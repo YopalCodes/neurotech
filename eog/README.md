@@ -1,6 +1,7 @@
 # EOG eye-movement classifier (NeuroPawn Knight + BrainFlow)
 
-Records EOG from the NeuroPawn Knight board, trains a classifier for
+Records EOG from the NeuroPawn Knight IMU board (BrainFlow `NEUROPAWN_KNIGHT_BOARD_IMU`),
+trains a classifier for
 **rest / look left / look right / blink**, and runs it live.
 
 ```
@@ -16,6 +17,9 @@ Every script accepts `--synthetic` to run on BrainFlow's fake board without hard
 
 Only one program can hold the board's serial port. Use the Visualizer to check
 electrode contact and signal quality, **close it**, and then run these scripts.
+
+Opening the port reboots the board, so every script waits a few seconds
+(`BOOT_SECONDS` in config.py) before it sends channel settings.
 
 ## Electrode placement
 

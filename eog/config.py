@@ -3,8 +3,9 @@
 from brainflow.board_shim import BoardIds
 
 # Board
-BOARD_ID = BoardIds.NEUROPAWN_KNIGHT_BOARD.value
+BOARD_ID = BoardIds.NEUROPAWN_KNIGHT_BOARD_IMU.value  # boot message says "IMU found"
 DEFAULT_PORT = "COM5"
+BOOT_SECONDS = 4  # the board reboots whenever the port opens; streams ~2.7 s later
 
 # Knight board channels (1-based, as labelled on the board) that carry EOG.
 # Horizontal: electrodes on the outer corners of the left and right eyes.

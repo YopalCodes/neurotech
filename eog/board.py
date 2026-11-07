@@ -23,19 +23,36 @@ def connect(port=config.DEFAULT_PORT, synthetic=False, configure=True):
 
     board = BoardShim(board_id, params)
     board.prepare_session()
-    if configure and not synthetic:
-        configure_channels(board)
-    board.start_stream(45000)
+    try:
+        if not synthetic:
+            # Opening the port resets the board; commands sent while it boots are lost.
+            time.sleep(config.BOOT_SECONDS)
+        if configure and not synthetic:
+            configure_channels(board)
+        board.start_stream(45000)
+    except Exception:
+        board.release_session()  # free the serial port so the next run can open it
+        raise
     return board, board_id
+
+
+def send_command(board, command):
+    """Send a config command. The Knight's reply can contain non-UTF-8 bytes,
+    which makes BrainFlow's Python wrapper fail to decode it even though the
+    command was already sent, so an undecodable reply is ignored."""
+    try:
+        reply = board.config_board(command)
+    except UnicodeDecodeError:
+        reply = "sent"
+    print(f"{command}: {reply.strip() or 'sent'}")
+    time.sleep(0.5)
 
 
 def configure_channels(board):
     """Turn on the EOG channels and add them to the right-leg-drive (bias)."""
     for ch in (config.HORIZONTAL_CHANNEL, config.VERTICAL_CHANNEL):
-        board.config_board(f"chon_{ch}_{config.CHANNEL_GAIN}")
-        time.sleep(0.5)
-        board.config_board(f"rldadd_{ch}")
-        time.sleep(0.5)
+        send_command(board, f"chon_{ch}_{config.CHANNEL_GAIN}")
+        send_command(board, f"rldadd_{ch}")
 
 
 def eog_rows(board_id):
