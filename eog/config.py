@@ -10,8 +10,8 @@ BOOT_SECONDS = 4  # the board reboots whenever the port opens; streams ~2.7 s la
 # Knight board channels (1-based, as labelled on the board) that carry EOG.
 # Horizontal: electrodes on the outer corners of the left and right eyes.
 # Vertical:   electrodes above and below one eye (blinks show up here).
-HORIZONTAL_CHANNEL = 1
-VERTICAL_CHANNEL = 2
+HORIZONTAL_CHANNEL = 6
+VERTICAL_CHANNEL = 5
 CHANNEL_GAIN = 12  # Knight PGA gain sent as "chon_<ch>_<gain>"
 
 # Event labels. Marker values are written into BrainFlow's marker channel.

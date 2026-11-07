@@ -31,22 +31,46 @@ def connect(port=config.DEFAULT_PORT, synthetic=False, configure=True, channels=
         if configure and not synthetic:
             configure_channels(board, channels)
         board.start_stream(45000)
+        if not synthetic:
+            wait_for_data(board)
     except Exception:
         board.release_session()  # free the serial port so the next run can open it
         raise
     return board, board_id
 
 
-def send_command(board, command):
-    """Send a config command. The Knight's reply can contain non-UTF-8 bytes,
-    which makes BrainFlow's Python wrapper fail to decode it even though the
-    command was already sent, so an undecodable reply is ignored."""
-    try:
-        reply = board.config_board(command)
-    except UnicodeDecodeError:
-        reply = "sent"
-    print(f"{command}: {reply.strip() or 'sent'}")
-    time.sleep(0.5)
+def wait_for_data(board, timeout=5.0):
+    start = time.monotonic()
+    while board.get_board_data_count() == 0:
+        if time.monotonic() - start > timeout:
+            raise RuntimeError(
+                "No data from the board. Close the NeuroPawn Visualizer, unplug and "
+                "replug the board, and try again."
+            )
+        time.sleep(0.1)
+
+
+def send_command(board, command, retries=10):
+    """Send a config command, resending it while the board is still booting.
+
+    The Knight's reply can contain non-UTF-8 bytes, which makes BrainFlow's
+    Python wrapper fail to decode it even though the command was already sent,
+    so an undecodable reply is ignored. Sometimes the board takes much longer
+    than BOOT_SECONDS to find its IMU; a command sent then is answered with
+    the boot message and lost.
+    """
+    for _ in range(retries):
+        try:
+            reply = board.config_board(command)
+        except UnicodeDecodeError:
+            reply = ""
+        if "Scanning for IMU" not in reply:
+            print(f"{command}: sent")
+            time.sleep(0.5)
+            return
+        print(f"{command}: board still booting, retrying...")
+        time.sleep(1.0)
+    raise RuntimeError("Board never finished booting (stuck on 'Scanning for IMU'). Unplug and replug it.")
 
 
 def configure_channels(board, channels=None):
