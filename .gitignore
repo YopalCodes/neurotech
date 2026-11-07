@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+
+# Recordings and trained models are personal and regenerable
+eog/data/
+eog/models/

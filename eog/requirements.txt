@@ -1,0 +1,6 @@
+brainflow>=5.23
+numpy
+scipy
+scikit-learn
+joblib
+matplotlib
