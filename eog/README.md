@@ -14,6 +14,12 @@ python live.py --port COM5       # real-time detection in the terminal
 
 Every script accepts `--synthetic` to run on BrainFlow's fake board without hardware.
 
+The repo includes two example sessions in `data/` and the model trained on them
+in `models/`. They were recorded from one person (channel 6 horizontal, channel 5
+vertical), so retrain on your own recordings for good live accuracy. `train.py`
+uses every CSV in `data/`, so move the example sessions out first if you only
+want your own.
+
 ## Close the NeuroPawn EXG Visualizer first
 
 Only one program can hold the board's serial port. Use the Visualizer to check

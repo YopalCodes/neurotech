@@ -2,6 +2,5 @@ __pycache__/
 *.pyc
 .venv/
 
-# Recordings and trained models are personal and regenerable
-eog/data/
-eog/models/
+# Recordings made on the wrong channels (noise only)
+eog/data/old_wrong_channels/

@@ -1,0 +1,15 @@
+{
+  "board_id": 66,
+  "sampling_rate": 125,
+  "horizontal_row": 6,
+  "vertical_row": 5,
+  "marker_row": 21,
+  "timestamp_row": 20,
+  "labels": {
+    "1": "rest",
+    "2": "left",
+    "3": "right",
+    "4": "blink"
+  },
+  "trials_completed": 80
+}
