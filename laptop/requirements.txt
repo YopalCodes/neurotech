@@ -1,0 +1,6 @@
+# Install the CUDA build of PyTorch FIRST (see README.md), then:
+#   pip install -r laptop/requirements.txt
+# Otherwise pip pulls in the CPU-only PyTorch and the GPU goes unused.
+ultralytics>=8.3
+opencv-python>=4.8
+PySide6>=6.6

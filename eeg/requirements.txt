@@ -1,0 +1,8 @@
+# EEG app. Can share the vision app's virtual environment:
+#   pip install -r eeg/requirements.txt
+brainflow>=5.12     # includes the NeuroPawn Knight board
+numpy
+scipy
+scikit-learn>=1.3
+PySide6>=6.6
+pyqtgraph>=0.13.7

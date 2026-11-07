@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# YOLO weights (downloaded automatically) and Ultralytics output
+*.pt
+runs/
+
+# EEG calibrations: personal recordings and models, made on each computer
+eeg/models/
+eeg/recordings/
+
+# Vision app: objects taught in the Teach tab (photos of your surroundings) and their model
+library/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
