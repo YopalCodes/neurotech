@@ -7,11 +7,12 @@ from brainflow.board_shim import BoardIds, BoardShim, BrainFlowInputParams
 import config
 
 
-def connect(port=config.DEFAULT_PORT, synthetic=False, configure=True):
+def connect(port=config.DEFAULT_PORT, synthetic=False, configure=True, channels=None):
     """Open a session and start streaming. Returns (board, board_id).
 
     `synthetic=True` uses BrainFlow's fake board so the pipeline can be tested
-    without hardware.
+    without hardware. `channels` defaults to the horizontal and vertical EOG
+    channels from config.
     """
     BoardShim.enable_dev_board_logger()
     params = BrainFlowInputParams()
@@ -28,7 +29,7 @@ def connect(port=config.DEFAULT_PORT, synthetic=False, configure=True):
             # Opening the port resets the board; commands sent while it boots are lost.
             time.sleep(config.BOOT_SECONDS)
         if configure and not synthetic:
-            configure_channels(board)
+            configure_channels(board, channels)
         board.start_stream(45000)
     except Exception:
         board.release_session()  # free the serial port so the next run can open it
@@ -48,9 +49,9 @@ def send_command(board, command):
     time.sleep(0.5)
 
 
-def configure_channels(board):
+def configure_channels(board, channels=None):
     """Turn on the EOG channels and add them to the right-leg-drive (bias)."""
-    for ch in (config.HORIZONTAL_CHANNEL, config.VERTICAL_CHANNEL):
+    for ch in channels or (config.HORIZONTAL_CHANNEL, config.VERTICAL_CHANNEL):
         send_command(board, f"chon_{ch}_{config.CHANNEL_GAIN}")
         send_command(board, f"rldadd_{ch}")
 

@@ -6,6 +6,7 @@ trains a classifier for
 
 ```
 pip install -r requirements.txt
+python check_signal.py --port COM5   # live view of all 8 channels: find your EOG channels
 python record.py --port COM5     # cued recording session (~6 min)
 python train.py --plot           # train + cross-validate, saves models/
 python live.py --port COM5       # real-time detection in the terminal
