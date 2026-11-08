@@ -22,3 +22,7 @@ eog/data/old_wrong_channels/
 .DS_Store
 Thumbs.db
 .vscode/
+
+# Remote device control: saved device list (local addresses) and downloaded scrcpy server
+remote/devices.json
+remote/vendor/
