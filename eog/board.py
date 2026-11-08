@@ -80,6 +80,13 @@ def configure_channels(board, channels=None):
         send_command(board, f"rldadd_{ch}")
 
 
+def imu_rows(board_id):
+    """Row indices for (accelerometer xyz, gyroscope xyz)."""
+    if board_id == config.BOARD_ID:
+        return list(config.ACCEL_ROWS), list(config.GYRO_ROWS)
+    return BoardShim.get_accel_channels(board_id), BoardShim.get_gyro_channels(board_id)
+
+
 def eog_rows(board_id):
     """Row indices in BrainFlow's data array for (horizontal, vertical) EOG."""
     exg = BoardShim.get_exg_channels(board_id)

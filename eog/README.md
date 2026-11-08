@@ -9,7 +9,8 @@ pip install -r requirements.txt
 python check_signal.py --port COM5   # live view of all 8 channels: find your EOG channels
 python record.py --port COM5     # cued recording session (~6 min)
 python train.py --plot           # train + cross-validate, saves models/
-python live.py --port COM5       # real-time detection in the terminal
+python live.py --port COM5       # real-time eye events + head tilt in the terminal
+python head_tilt.py --port COM5  # head tilt only, with live angles
 ```
 
 Every script accepts `--synthetic` to run on BrainFlow's fake board without hardware.
@@ -53,6 +54,30 @@ The scripts mark each cue onset in BrainFlow's marker channel, with 1 = rest, 2 
 sidecar. By default you get 20 trials per class in random order. Keep your head still,
 and save blinks for the gaps between trials. Record 2–3 sessions, with the electrodes
 re-applied between some of them; `train.py` uses every file in `data/`.
+
+## Head tilt (IMU)
+
+`live.py` and `head_tilt.py` read the Knight's accelerometer (rows 11–13, m/s²)
+and gyroscope (rows 14–16, rad/s). They report **left / right / forward / back**
+when your head tilts more than 15°, and **neutral** once it comes back within 10°.
+
+Calibration runs every time either script starts, and you follow the prompts in
+the terminal:
+
+1. **Hold still, looking straight ahead (3 s).** This sets zero tilt and
+   measures the gyro bias.
+2. **Tilt forward and hold**, then come back to neutral.
+3. **Tilt right and hold**, then come back to neutral.
+
+Steps 2–3 work out which way is forward and right, so the board can be mounted
+at any angle. Recalibrate (restart) if the board shifts on your head. Tracking
+combines gyro and accelerometer (a complementary filter), so it stays smooth
+during movement without drifting.
+
+Turning your head makes your eyes counter-rotate, which looks like a left/right
+glance in the EOG. While the head turns faster than 60°/s (and for 1.5 s after),
+`live.py` ignores eye events. Use `--no-imu` to skip head tilt. Thresholds are in
+[config.py](config.py).
 
 ## Pipeline
 

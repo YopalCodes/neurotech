@@ -14,6 +14,20 @@ HORIZONTAL_CHANNEL = 6
 VERTICAL_CHANNEL = 5
 CHANNEL_GAIN = 12  # Knight PGA gain sent as "chon_<ch>_<gain>"
 
+# Knight IMU rows in BrainFlow's data array. BrainFlow only lists them as
+# "other" channels; these were identified from recordings (accel norm = 9.4 m/s²,
+# gyro in rad/s). Rows 17-19 appear to be the magnetometer and aren't used.
+ACCEL_ROWS = (11, 12, 13)  # m/s²
+GYRO_ROWS = (14, 15, 16)   # rad/s
+
+# Head tilt
+TILT_ENTER_DEG = 15     # tilt past this to register left/right/forward/back
+TILT_EXIT_DEG = 10      # come back inside this to return to neutral
+CAL_HOLD_SECONDS = 3    # how long to hold still for zeroing
+CAL_TILT_DEG = 15       # minimum tilt accepted during the calibration tilts
+IMU_ALPHA = 0.02        # complementary filter: weight of the accelerometer per sample
+HEAD_MOTION_GATE = 60   # deg/s; ignore eye events while the head turns faster than this
+
 # Event labels. Marker values are written into BrainFlow's marker channel.
 LABELS = {1: "rest", 2: "left", 3: "right", 4: "blink"}
 MARKERS = {name: value for value, name in LABELS.items()}

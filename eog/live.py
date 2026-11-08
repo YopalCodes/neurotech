@@ -1,12 +1,17 @@
-"""Classify EOG in real time with the model from train.py.
+"""Classify EOG in real time with the model from train.py, plus head tilt from the IMU.
 
     python live.py --port COM5
-    python live.py --synthetic
+    python live.py --port COM5 --no-imu
+    python live.py --synthetic            # implies --no-imu
 
 Every STEP seconds the newest epoch-length window is classified. An event is
 reported once the same non-rest label wins CONFIRM windows in a row with
 probability >= --threshold, then detection pauses for REFRACTORY seconds so
 the return-to-center saccade isn't reported as a second event.
+
+Head tilt is calibrated at startup (see imu.py). Moving the head makes the eyes
+counter-rotate, which looks like a left/right look in the EOG, so eye events
+are ignored while the head is turning fast and for one epoch afterwards.
 """
 
 import argparse
@@ -20,6 +25,7 @@ from brainflow.board_shim import BoardShim
 import board as eog_board
 import config
 import features
+from imu import HeadTilt
 
 MODEL_PATH = Path(__file__).parent / "models" / "eog_classifier.joblib"
 STEP = 0.1
@@ -33,6 +39,7 @@ def main():
     parser.add_argument("--port", default=config.DEFAULT_PORT)
     parser.add_argument("--synthetic", action="store_true")
     parser.add_argument("--threshold", type=float, default=0.7)
+    parser.add_argument("--no-imu", action="store_true", help="skip head tilt")
     args = parser.parse_args()
 
     saved = joblib.load(MODEL_PATH)
@@ -46,12 +53,26 @@ def main():
     n = features.epoch_length(fs)
     min_samples = n + 3 * fs
 
-    print("Warming up... (Ctrl+C to stop)")
     streak_label, streak = None, 0
     quiet_until = 0.0
     try:
+        tilt = None
+        if not (args.no_imu or args.synthetic):
+            tilt = HeadTilt(board, board_id)
+            tilt.calibrate()
+        print("Warming up... (Ctrl+C to stop)")
         while True:
             time.sleep(STEP)
+            now = time.monotonic()
+            if tilt:
+                change = tilt.update()
+                if change:
+                    pitch, roll = tilt.angles()
+                    print(f"{time.strftime('%H:%M:%S')}  HEAD {change.upper():7s} "
+                          f"(forward/back {pitch:+.0f} deg, left/right {roll:+.0f} deg)")
+                if tilt.rate > config.HEAD_MOTION_GATE:
+                    quiet_until = max(quiet_until, now + config.EPOCH_END)
+
             data = board.get_current_board_data(BUFFER_SECONDS * fs)
             if data.shape[1] < min_samples:
                 continue
@@ -61,7 +82,6 @@ def main():
             best = int(np.argmax(proba))
             label, p = model.classes_[best], proba[best]
 
-            now = time.monotonic()
             if label == "rest" or p < args.threshold or now < quiet_until:
                 streak_label, streak = None, 0
                 continue
