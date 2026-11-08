@@ -30,6 +30,7 @@ PINS = (17, 18, 27, 22)   # IN1, IN2, IN3, IN4
 STEP_DELAY = 0.002        # seconds per half-step: 2 ms is about 7 RPM on a 28BYJ-48. Smaller = faster;
                           # below about 1 ms it stalls.
 REVERSE = True            # True: swapped for this motor's wiring ("right" was spinning left)
+HALF_STEPS_PER_REV = 4096 # 28BYJ-48 output shaft, half-stepping (about 0.09 degrees per half-step)
 
 # Half-step sequence for a unipolar stepper on a ULN2003: smoother and stronger than full steps.
 SEQUENCE = (
@@ -38,30 +39,61 @@ SEQUENCE = (
 )
 
 
+class _NoCoil:
+    """Stands in for a GPIO pin when there's no GPIO (e.g. testing on a laptop)."""
+    value = 0
+
+    def off(self):
+        pass
+
+
 class Stepper:
     """Steps the motor in a background thread: a command starts it spinning and it keeps going
     until told otherwise. When stopped, every coil is switched off so the motor and driver don't
-    heat up (the shaft can then be turned by hand)."""
+    heat up (the shaft can then be turned by hand, which the step count can't see).
 
-    def __init__(self, pins, step_delay):
-        from gpiozero import OutputDevice
+    `position` counts half-steps from "forward" (0). It is exact as long as the motor doesn't
+    skip steps; zero() redefines forward. go_to() moves back to a position and stops there.
+    """
 
-        self.coils = [OutputDevice(pin) for pin in pins]
+    def __init__(self, pins, step_delay, simulated=False):
+        if simulated:
+            self.coils = [_NoCoil() for _ in pins]
+        else:
+            from gpiozero import OutputDevice
+            self.coils = [OutputDevice(pin) for pin in pins]
+        self.simulated = simulated
         self.step_delay = step_delay
         self.direction = 0   # +1, -1, or 0 for stopped
+        self.position = 0    # half-steps from forward, in the motor's own direction
+        self.target = None   # position go_to() is heading for, or None
         self._phase = 0
         self._wake = threading.Event()
         threading.Thread(target=self._run, name="stepper", daemon=True).start()
 
     def spin(self, direction):
-        """+1 or -1 to spin, 0 to stop."""
+        """+1 or -1 to spin, 0 to stop. Cancels go_to()."""
+        self.target = None
         self.direction = direction
+        self._wake.set()
+
+    def go_to(self, position):
+        """Moves to `position` (half-steps) the way it came, without wrapping around, then stops."""
+        self.direction = 0
+        self.target = position
         self._wake.set()
 
     def _run(self):
         next_step = time.perf_counter()
         while True:
-            direction = self.direction
+            target = self.target
+            if target is not None:
+                gap = target - self.position
+                direction = (gap > 0) - (gap < 0)
+                if direction == 0:
+                    self.target = None   # arrived
+            else:
+                direction = self.direction
             if direction == 0:
                 for coil in self.coils:
                     coil.off()
@@ -72,6 +104,7 @@ class Stepper:
             self._phase = (self._phase + direction) % len(SEQUENCE)
             for coil, on in zip(self.coils, SEQUENCE[self._phase]):
                 coil.value = on
+            self.position += direction
             next_step += self.step_delay
             delay = next_step - time.perf_counter()
             if delay > 0:
@@ -82,15 +115,35 @@ class Stepper:
 
 try:
     motor = Stepper(PINS, STEP_DELAY)
-except Exception as e:  # not on a Pi, or gpiozero missing
-    motor = None
-    log.warning("GPIO unavailable (%s): motor commands will only be logged", e)
+except Exception as e:  # not on a Pi, or gpiozero missing: simulate it, so the position still counts
+    motor = Stepper(PINS, STEP_DELAY, simulated=True)
+    log.warning("GPIO unavailable (%s): simulating the motor (its position is tracked, nothing moves)", e)
+
+
+def _logical(steps):
+    """Motor direction -> our direction (+ = right), allowing for REVERSE."""
+    return -steps if REVERSE else steps
+
+
+def angle():
+    """Degrees from forward: positive = right of forward, negative = left."""
+    return _logical(motor.position) * 360.0 / HALF_STEPS_PER_REV
+
+
+def status():
+    """Reported to the laptop 10 times a second by command_server.py."""
+    if motor.target is not None:
+        doing = "homing"
+    elif motor.direction == 0:
+        doing = "stopped"
+    else:
+        doing = "right" if _logical(motor.direction) > 0 else "left"
+    return {"stepper_angle": round(angle(), 1), "stepper": doing}
 
 
 def _spin(direction, description):
     log.info("Motor: %s", description)
-    if motor is not None:
-        motor.spin(-direction if REVERSE else direction)
+    motor.spin(_logical(direction))
 
 
 def stop():
@@ -107,6 +160,18 @@ def right():
 
 def center():
     _spin(0, "stopped (target centred)")
+
+
+def zero():
+    """'Set forward here': the motor's current direction becomes forward (0 degrees)."""
+    log.info("Motor: forward set here (was %+.1f deg)", angle())
+    motor.position = 0
+
+
+def home():
+    """'Return to forward': spins back to 0 degrees the way it came, then stops."""
+    log.info("Motor: returning to forward from %+.1f deg", angle())
+    motor.go_to(0)
 
 
 # From the EEG app (eye gestures). left and right above are shared with the vision app.
@@ -129,6 +194,8 @@ HANDLERS = {
     "left": left,
     "right": right,
     "center": center,
+    "zero": zero,
+    "home": home,
     "up": up,
     "down": down,
     "squint": squint,

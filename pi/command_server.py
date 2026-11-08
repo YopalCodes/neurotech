@@ -27,6 +27,8 @@ log = logging.getLogger("command_server")
 
 STOP = ("stop", "{}")
 MAX_LINE = 64 * 1024
+STATUS_EVERY = 0.1      # seconds between status lines sent to the laptop
+MAX_UNSENT = 2048       # bytes of status allowed to queue up before new ones are dropped
 
 
 class CommandRunner:
@@ -92,10 +94,22 @@ class CommandRunner:
 
 def serve(host, port, runner):
     """Accepts one laptop at a time. A new connection replaces the old one, so a laptop
-    that reconnects after a Wi-Fi drop is never locked out by its own dead connection."""
+    that reconnects after a Wi-Fi drop is never locked out by its own dead connection.
+
+    Every STATUS_EVERY seconds it also sends the laptop one JSON line with actions.status(),
+    e.g. {"status": {"stepper_angle": 35.2, "stepper": "right"}}. The socket is non-blocking and
+    unsent status is capped, so a laptop that never reads can't stall commands or the failsafe."""
     server = socket.create_server((host, port))
     log.info("Listening for the laptop on port %d", port)
-    client, buffer = None, b""
+    client, buffer, outgoing, last_status = None, b"", b"", 0.0
+
+    def disconnect(reason):
+        nonlocal client
+        log.info("Laptop disconnected")
+        client.close()
+        client = None
+        runner.stop(reason)
+
     try:
         while True:
             watch = [server] if client is None else [server, client]
@@ -108,19 +122,19 @@ def serve(host, port, runner):
                     client.close()
                 else:
                     log.info("Laptop connected from %s", addr[0])
-                client, buffer = new_client, b""
+                new_client.setblocking(False)
+                client, buffer, outgoing = new_client, b"", b""
 
             if client is not None and client in readable:
                 try:
                     data = client.recv(4096)
+                except BlockingIOError:
+                    data = None
                 except OSError:
                     data = b""
-                if not data:
-                    log.info("Laptop disconnected")
-                    client.close()
-                    client = None
-                    runner.stop("laptop disconnected")
-                else:
+                if data == b"":
+                    disconnect("laptop disconnected")
+                elif data:
                     buffer += data
                     *lines, buffer = buffer.split(b"\n")
                     for line in lines:
@@ -129,6 +143,22 @@ def serve(host, port, runner):
                     if len(buffer) > MAX_LINE:
                         log.warning("Dropping an over-long message")
                         buffer = b""
+
+            now = time.monotonic()
+            if client is not None and now - last_status >= STATUS_EVERY:
+                last_status = now
+                if len(outgoing) < MAX_UNSENT:
+                    try:
+                        outgoing += (json.dumps({"status": actions.status()}) + "\n").encode()
+                    except Exception:
+                        log.exception("actions.status() failed")
+            if client is not None and outgoing:
+                try:
+                    outgoing = outgoing[client.send(outgoing):]
+                except BlockingIOError:
+                    pass
+                except OSError:
+                    disconnect("laptop disconnected")
 
             runner.check_failsafe()
     finally:

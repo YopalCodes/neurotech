@@ -4,3 +4,4 @@ scipy
 scikit-learn
 joblib
 matplotlib
+bleak  # Bluetooth LE, for dog_control.py

@@ -1,4 +1,8 @@
-"""Sends commands to the Pi over Wi-Fi (TCP, one JSON object per line). Reconnects on its own."""
+"""Sends commands to the Pi over Wi-Fi (TCP, one JSON object per line). Reconnects on its own.
+
+The Pi sends back a status line about 10 times a second, e.g.
+{"status": {"stepper_angle": 35.2, "stepper": "right"}}; the latest is kept in `status`.
+"""
 
 import json
 import logging
@@ -16,6 +20,8 @@ class PiLink:
         self._sock = None
         self._lock = threading.Lock()
         self._send_lock = threading.Lock()  # keeps messages from different threads from interleaving
+        self.status = {}          # latest status from the Pi ({} until one arrives)
+        self.status_time = 0.0    # time.monotonic() when it arrived
         self._running = True
         threading.Thread(target=self._connect_loop, name="pi_link", daemon=True).start()
 
@@ -70,4 +76,32 @@ class PiLink:
                         self._sock = sock
                     warned = False
                     log.info("Connected to the Pi at %s:%d", self.host, self.port)
+                    threading.Thread(target=self._read_loop, args=(sock,), name="pi_link-read",
+                                     daemon=True).start()
             time.sleep(1)
+
+    def _read_loop(self, sock):
+        """Reads the Pi's status lines. Also notices when the Pi closes the connection."""
+        buffer = b""
+        while self._running and self._sock is sock:
+            try:
+                data = sock.recv(4096)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            if not data:
+                break
+            buffer += data
+            *lines, buffer = buffer.split(b"\n")
+            for line in lines:
+                try:
+                    message = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(message, dict) and isinstance(message.get("status"), dict):
+                    self.status, self.status_time = message["status"], time.monotonic()
+            buffer = buffer[-65536:]
+        if self._sock is sock:
+            log.warning("The Pi closed the connection")
+            self._drop(sock)

@@ -5,6 +5,7 @@ the motor with the NeuroPawn EOG headset.
     python laptop/app.py --pi 192.168.1.50
     python laptop/app.py --source 0        # use this laptop's webcam instead of the Pi
     python laptop/app.py --eog-port COM10  # also connect the EOG headset (Eyes tab)
+    python laptop/app.py --eog-port COM10 --dog   # and drive the MechDog with head tilt (Dog tab)
 """
 
 import argparse
@@ -13,8 +14,10 @@ import queue
 import sys
 import time
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QFont, QKeySequence, QShortcut
+import math
+
+from PySide6.QtCore import QPointF, Qt, QTimer
+from PySide6.QtGui import QColor, QFont, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QFormLayout, QGroupBox, QHBoxLayout,
     QHeaderView, QLabel, QMainWindow, QPlainTextEdit, QPushButton, QSlider, QSplitter,
@@ -23,6 +26,7 @@ from PySide6.QtWidgets import (
 
 from engine import Engine, describe
 from eye_control import EyeControl, EyePanel
+from dog_panel import DogController, DogPanel
 from library import DEFAULT_ROOT, Library
 from teach import TeachPanel
 from video_view import VideoView
@@ -32,6 +36,51 @@ GREEN, AMBER, RED, GREY = "#2e9e4f", "#d49a00", "#d64545", "#888888"
 
 def dot(color, text):
     return f'<span style="color:{color}">●</span> {text}'
+
+
+HOMING_TIMEOUT = 60   # seconds; a full turn back takes about 8 s at the default speed
+
+
+def facing_text(angle):
+    """35.2 -> '35° right of forward'."""
+    if angle is None:
+        return "unknown"
+    if abs(angle) < 0.5:
+        return "forward"
+    return f"{abs(angle):.0f}° {'right' if angle > 0 else 'left'} of forward"
+
+
+class StepperDial(QWidget):
+    """A small dial: the tick at the top is forward, the arrow is where the stepper points."""
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedSize(64, 64)
+        self.angle = None
+
+    def set_angle(self, angle):
+        if angle != self.angle:
+            self.angle = angle
+            self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        c = QPointF(self.width() / 2, self.height() / 2)
+        r = min(self.width(), self.height()) / 2 - 4
+        text = self.palette().windowText().color()
+        p.setPen(QPen(QColor(GREY), 2))
+        p.drawEllipse(c, r, r)
+        p.setPen(QPen(text, 3))
+        p.drawLine(QPointF(c.x(), c.y() - r - 3), QPointF(c.x(), c.y() - r + 6))   # forward tick
+        if self.angle is None:
+            return
+        a = math.radians(self.angle)   # 0 = up (forward), positive = clockwise (right)
+        tip = QPointF(c.x() + math.sin(a) * (r - 6), c.y() - math.cos(a) * (r - 6))
+        arrow = QPen(QColor(GREEN), 4)
+        arrow.setCapStyle(Qt.RoundCap)
+        p.setPen(arrow)
+        p.drawLine(c, tip)
 
 
 class QueueLogHandler(logging.Handler):
@@ -46,10 +95,11 @@ class QueueLogHandler(logging.Handler):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, engine, log_queue, library, eyes=None):
+    def __init__(self, engine, log_queue, library, eyes=None, dog=None):
         super().__init__()
         self.engine = engine
         self.eyes = eyes
+        self.dog = dog
         self.log_queue = log_queue
         self.shown_id = None
         self.names_version = 0
@@ -74,12 +124,14 @@ class MainWindow(QMainWindow):
         self.ai_status = QLabel()
         self.ai_status.setWordWrap(True)
         self.speed_status = QLabel()
+        self.stepper_status = QLabel()
         status_box = QGroupBox("Status")
         form = QFormLayout(status_box)
         form.addRow("Video:", self.video_status)
         form.addRow("Pi commands:", self.pi_status)
         form.addRow("AI:", self.ai_status)
         form.addRow("Speed:", self.speed_status)
+        form.addRow("Stepper:", self.stepper_status)
 
         self.table = QTableWidget(0, 2)
         self.table.setHorizontalHeaderLabels(["Object", "Confidence"])
@@ -135,6 +187,29 @@ class MainWindow(QMainWindow):
         self.motor_status.setWordWrap(True)
         motor.addWidget(self.motor_status)
 
+        # Which way the stepper points (the Pi counts its steps; forward = 0).
+        facing = QHBoxLayout()
+        self.dial = StepperDial()
+        facing.addWidget(self.dial)
+        self.facing = QLabel()
+        self.facing.setWordWrap(True)
+        self.facing.setStyleSheet("font-weight: bold;")
+        facing.addWidget(self.facing, 1)
+        motor.addLayout(facing)
+        facing_buttons = QHBoxLayout()
+        self.zero_button = QPushButton("Set forward here")
+        self.zero_button.setFocusPolicy(Qt.NoFocus)
+        self.zero_button.setToolTip("The stepper's current direction becomes forward (0°)")
+        self.zero_button.clicked.connect(self.set_forward)
+        self.home_button = QPushButton("↺ Return to forward")
+        self.home_button.setFocusPolicy(Qt.NoFocus)
+        self.home_button.setToolTip("Spins back to forward (0°) the way it came, then stops")
+        self.home_button.clicked.connect(self.return_forward)
+        facing_buttons.addWidget(self.zero_button)
+        facing_buttons.addWidget(self.home_button)
+        motor.addLayout(facing_buttons)
+        self.homing_until = 0.0
+
         hint = QLabel("Esc turns AI control and eye control off.")
         hint.setStyleSheet(f"color: {GREY};")
 
@@ -163,6 +238,10 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(drive, "Drive")
         self.tabs.addTab(self.teach, "Teach")
         self.tabs.addTab(self.eye_panel, "Eyes")
+        self.dog_panel = DogPanel(dog, eyes)
+        self.dog_panel.toggle.toggled.connect(self.set_dog)
+        self.dog_panel.stop_button.clicked.connect(self.stop_dog)
+        self.tabs.addTab(self.dog_panel, "Dog")
         self.tabs.currentChanged.connect(lambda _: self.teach.cancel_photo())
 
         side = QWidget()
@@ -215,7 +294,34 @@ class MainWindow(QMainWindow):
             self.ai_button.setChecked(False)
         self.engine.eye_control = on
 
+    def set_dog(self, on):
+        self.dog.set_enabled(on)
+
+    def stop_dog(self):
+        self.dog_panel.toggle.setChecked(False)
+        if self.dog is not None:
+            self.dog.stop()
+
+    def set_forward(self):
+        """'Set forward here': the stepper's current direction becomes 0°."""
+        if self.engine.link is not None:
+            self.engine.link.send({"cmd": "zero"})
+
+    def return_forward(self):
+        """'Return to forward': sends 'home' like a held button until the Pi reports it's back at
+        0°, so the Pi's failsafe still stops it if the laptop or Wi-Fi drops."""
+        self.homing_until = time.monotonic() + HOMING_TIMEOUT
+        self.engine.manual_cmd = "home"
+
+    def stepper_angle(self):
+        """The stepper's angle from the Pi's latest status, or None if there's no recent one."""
+        link = self.engine.link
+        if link is None or not link.connected or time.monotonic() - link.status_time > 1.0:
+            return None
+        return link.status.get("stepper_angle")
+
     def set_manual(self, name):
+        self.homing_until = 0.0   # a Spin button cancels Return to forward
         self.engine.manual_cmd = name
         if name is None and self.engine.eye_control:
             self.eyes.state = "stop"        # after a held Spin button, stay stopped
@@ -223,6 +329,9 @@ class MainWindow(QMainWindow):
     def escape(self):
         self.ai_button.setChecked(False)
         self.eye_panel.toggle.setChecked(False)
+        self.stop_dog()
+        if self.engine.manual_cmd == "home":
+            self.set_manual(None)   # also stops Return to forward
         self.teach.cancel_photo()
 
     def space(self):
@@ -263,6 +372,7 @@ class MainWindow(QMainWindow):
             self.names_version = e.names_version
             self.fill_targets()
         self.eye_panel.refresh()
+        self.dog_panel.refresh()
 
         now = time.monotonic()
         video_live = e.stream is not None and now - e.stream.last_frame_time < 1.0
@@ -305,11 +415,37 @@ class MainWindow(QMainWindow):
         else:
             self.speed_status.setText("–")
 
+        angle = self.stepper_angle()
+        self.dial.set_angle(angle)
+        self.zero_button.setEnabled(angle is not None)
+        self.home_button.setEnabled(angle is not None)
+        if angle is not None:
+            doing = e.link.status.get("stepper", "")
+            self.facing.setText(f"Facing: {facing_text(angle)}")
+            self.stepper_status.setText(facing_text(angle) + (f" · {doing}" if doing and doing != "stopped" else ""))
+        elif e.link is not None and e.link.connected:
+            self.facing.setText("Facing: unknown")
+            self.stepper_status.setText(f"<span style='color:{AMBER}'>position unknown: update the Pi's code</span>")
+        else:
+            self.facing.setText("Facing: unknown")
+            self.stepper_status.setText("–")
+        if self.homing_until:
+            if e.manual_cmd != "home":
+                self.homing_until = 0.0   # cancelled (Spin button or Esc)
+            elif angle is None or now > self.homing_until or (
+                    abs(angle) < 0.05 and e.link.status.get("stepper") == "stopped"):
+                self.homing_until = 0.0
+                self.engine.manual_cmd = None
+                if e.eye_control:
+                    self.eyes.state = "stop"
+
         if e.link is None or not e.link.connected:
             self.motor_status.setText(
                 f"<span style='color:{RED}'>Pi not connected, so the motor can't move.</span> "
                 f"<span style='color:{GREY}'>Run command_server.py on the Pi, then open this app "
                 f"with --pi &lt;the Pi's IP&gt;.</span>")
+        elif e.manual_cmd == "home":
+            self.motor_status.setText(f"<b style='color:{GREEN}'>Returning to forward...</b>")
         elif e.manual_cmd and e.sent and e.sent[1] == "manual":
             self.motor_status.setText(f"<b style='color:{GREEN}'>Spinning {e.manual_cmd}...</b>")
         elif e.eye_control:
@@ -358,6 +494,8 @@ class MainWindow(QMainWindow):
         self.timer.stop()
         self.teach.shutdown()
         self.engine.stop()
+        if self.dog is not None:
+            self.dog.close()    # sends the dog a stop, then disconnects
         if self.eyes is not None:
             self.eyes.close()   # stop_stream() + release_session(), as live.py does on exit
         event.accept()
@@ -383,6 +521,10 @@ def parse_args():
                         help="the NeuroPawn EOG headset's serial port, e.g. COM10, for the Eyes tab")
     parser.add_argument("--no-imu", action="store_true",
                         help="skip the headset's head tilt (no calibration, no head-movement filter)")
+    parser.add_argument("--dog", action="store_true",
+                        help="connect to the MechDog (running mechdog/main.py) over Bluetooth for the Dog tab")
+    parser.add_argument("--dog-dry-run", action="store_true",
+                        help="Dog tab without a dog: shows the commands but sends nothing")
     return parser.parse_args()
 
 
@@ -396,10 +538,15 @@ def main():
     console.setFormatter(logging.Formatter("%(asctime)s %(name)s: %(message)s", "%H:%M:%S"))
     logging.basicConfig(level=logging.INFO, handlers=[console, gui_handler])
 
+    # The dog connects over Bluetooth in the background, while the headset connects below.
+    dog = DogController(dry_run=args.dog_dry_run) if (args.dog or args.dog_dry_run) else None
+
     # The EOG headset connects once, here, before the window opens (as Aram's live.py does).
     eyes = None
     if args.eog_port:
         eyes = EyeControl(args.eog_port, use_imu=not args.no_imu)
+        if dog is not None:
+            eyes.on_tilt = dog.on_tilt   # head tilt steers the dog
         print(f"Connecting to the EOG headset on {args.eog_port} (the board restarts when its port "
               "opens)...", flush=True)
         if eyes.use_imu:
@@ -415,7 +562,7 @@ def main():
     engine = Engine(args.pi, args.stream_port, args.cmd_port, args.source,
                     args.model, args.imgsz, args.conf, custom_model=library.model_path)
     engine.eyes = eyes
-    window = MainWindow(engine, log_queue, library, eyes)
+    window = MainWindow(engine, log_queue, library, eyes, dog)
     window.show()
     engine.start()
     sys.exit(app.exec())

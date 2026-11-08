@@ -138,6 +138,7 @@ class EyeControl:
         self.head_state = None     # left / right / forward / back / neutral, if the IMU is on
         self.pitch = self.roll = 0.0
         self.head_moving = False   # eye events paused because the head is turning
+        self.on_tilt = None        # called with (change, roll) on every head-tilt update (dog_panel.py)
         self.description = ""
         self.error = None
         self.connected = False
@@ -186,6 +187,8 @@ class EyeControl:
                 self.probs = message[1]
             elif kind == "tilt":
                 self.head_state, self.pitch, self.roll, change, self.head_moving = message[1:]
+                if self.on_tilt is not None:
+                    self.on_tilt(change, self.roll)
                 if change:
                     log.info("Head: %s (forward/back %+.0f°, left/right %+.0f°)",
                              change.upper(), self.pitch, self.roll)
