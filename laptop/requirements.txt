@@ -8,3 +8,4 @@ PySide6>=6.6
 av
 cryptography
 Pillow
+meegkit>=0.2        # Focus tab: the TRCA classifier (eog/focus.py)

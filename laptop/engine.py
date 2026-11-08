@@ -15,7 +15,9 @@ reload never makes a held button stutter.
 
 Two models run on every frame: the main one (80 everyday objects) and, once you have trained
 one in the Teach tab, the model of your own objects. Their detections are merged into one
-result, so decide() and the display treat both the same way.
+result, so decide() and the display treat both the same way. The main model only reports the
+object types in `show_only` (laptops and phones by default; app.py --objects changes it);
+taught objects are always reported.
 """
 
 import logging
@@ -67,7 +69,8 @@ def merge(base, extra):
 
 
 class Engine:
-    def __init__(self, pi, stream_port, cmd_port, source, model, imgsz, conf, custom_model=None):
+    def __init__(self, pi, stream_port, cmd_port, source, model, imgsz, conf, custom_model=None,
+                 show_only=None):
         self.pi = pi
         self.cmd_port = cmd_port
         source = source or f"http://{pi}:{stream_port}/stream"
@@ -75,13 +78,14 @@ class Engine:
         self.model_name = model
         self.custom_model_path = Path(custom_model) if custom_model else None
         self.imgsz = imgsz
+        self.show_only = list(show_only) if show_only else None   # None: all 80 built-in types
 
         # Controls, set by the GUI.
         self.ai_enabled = False   # off at start: nothing moves until you turn it on
         self.eye_control = False  # when on, the motor follows the eyes
         self.eyes = None          # EyeControl, if the app was started with --eog-port
         self.manual_cmd = None
-        self.target = TARGET
+        self.target = self.show_only[0] if self.show_only and TARGET not in self.show_only else TARGET
         self.conf = conf
 
         # State, read by the GUI.
@@ -155,6 +159,15 @@ class Engine:
         self.status = f"Loading {self.model_name} (downloaded the first time)..."
         model = YOLO(self.model_name)
         base_names = sorted(model.names.values())
+        shown_ids = None
+        if self.show_only:
+            unknown = [n for n in self.show_only if n not in base_names]
+            if unknown:
+                log.warning("%s doesn't know %s; it knows: %s", self.model_name, ", ".join(unknown),
+                            ", ".join(base_names))
+            shown_ids = [i for i, n in model.names.items() if n in self.show_only]
+            base_names = [n for n in base_names if n in self.show_only]
+            log.info("Showing only: %s (plus taught objects)", ", ".join(base_names) or "nothing")
         self.status = "Warming up the GPU..."
         warm_up(model)
         custom = None
@@ -178,7 +191,7 @@ class Engine:
             if frame is not None:
                 start = time.perf_counter()
                 options = dict(device=device, imgsz=self.imgsz, conf=self.conf, verbose=False, **precision)
-                result = model.predict(frame, **options)[0]
+                result = model.predict(frame, classes=shown_ids, **options)[0]
                 if custom is not None:
                     result = merge(result, custom.predict(frame, **options)[0])
                 ai_ms = (time.perf_counter() - start) * 1000
@@ -240,6 +253,8 @@ class Engine:
     def _set_names(self, base_names, custom):
         custom_names = sorted(custom.names.values(), key=str.lower) if custom is not None else []
         names = custom_names + [n for n in base_names if n not in custom_names]
+        if not names:
+            names = [self.target]
         if self.target not in names:
             fallback = TARGET if TARGET in names else names[0]
             log.warning("Nothing called %r can be detected now; targeting %r instead", self.target, fallback)

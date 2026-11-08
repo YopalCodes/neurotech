@@ -26,3 +26,6 @@ Thumbs.db
 # Remote device control: saved device list (local addresses) and downloaded scrcpy server
 remote/devices.json
 remote/vendor/
+
+# Focus tab: which phone/PC each box connects to on this laptop
+laptop/focus_devices.json

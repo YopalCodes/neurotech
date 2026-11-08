@@ -7,6 +7,8 @@ and phones (remote/).
     python laptop/app.py --source 0        # use this laptop's webcam instead of the Pi
     python laptop/app.py --eog-port COM10  # also connect the EOG headset (Eyes tab)
     python laptop/app.py --eog-port COM10 --dog   # and drive the MechDog with head tilt (Dog tab)
+    python laptop/app.py --eog-port COM10 --focus # and select devices by looking at them (Focus tab)
+    python laptop/app.py --objects all     # show all 80 object types, not just laptops and phones
 """
 
 import argparse
@@ -28,6 +30,7 @@ from PySide6.QtWidgets import (
 from engine import Engine, describe
 from eye_control import EyeControl, EyePanel
 from devices_panel import DevicesPanel
+from focus_panel import FocusEvents, FocusPanel
 from dog_panel import DogController, DogPanel
 from library import DEFAULT_ROOT, Library
 from teach import TeachPanel
@@ -97,11 +100,12 @@ class QueueLogHandler(logging.Handler):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, engine, log_queue, library, eyes=None, dog=None):
+    def __init__(self, engine, log_queue, library, eyes=None, dog=None, focus_events=None):
         super().__init__()
         self.engine = engine
         self.eyes = eyes
         self.dog = dog
+        self.focus_events = focus_events
         self.log_queue = log_queue
         self.shown_id = None
         self.names_version = 0
@@ -246,6 +250,11 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.dog_panel, "Dog")
         self.devices_panel = DevicesPanel()
         self.tabs.addTab(self.devices_panel, "Devices")
+        # Focus picks a device by looking at it; it connects through the Devices tab.
+        self.focus_panel = FocusPanel(eyes, focus_events, engine, self.devices_panel)
+        self.focus_panel.before_open = self.focus_starting
+        self.focus_panel.show_devices = lambda: self.tabs.setCurrentWidget(self.devices_panel)
+        self.tabs.addTab(self.focus_panel, "Focus")
         self.tabs.currentChanged.connect(lambda _: self.teach.cancel_photo())
 
         side = QWidget()
@@ -297,6 +306,13 @@ class MainWindow(QMainWindow):
             self.eyes.state = "stop"        # start still: only a new look left/right moves it
             self.ai_button.setChecked(False)
         self.engine.eye_control = on
+
+    def focus_starting(self):
+        """Looking between the Focus boxes moves your eyes left and right, so eye control of the
+        motor goes off while Focus runs."""
+        if self.engine.eye_control:
+            self.eye_panel.toggle.setChecked(False)
+            logging.getLogger("focus").info("Eye control off while Focus runs (turn it back on in the Eyes tab)")
 
     def set_dog(self, on):
         self.dog.set_enabled(on)
@@ -377,6 +393,7 @@ class MainWindow(QMainWindow):
             self.fill_targets()
         self.eye_panel.refresh()
         self.dog_panel.refresh()
+        self.focus_panel.refresh()
 
         now = time.monotonic()
         video_live = e.stream is not None and now - e.stream.last_frame_time < 1.0
@@ -410,6 +427,8 @@ class MainWindow(QMainWindow):
             self.ai_status.setText(dot(RED, "crashed"))
         elif e.ready:
             taught = f" + {len(e.custom_names)} taught" if e.custom_names else ""
+            if e.show_only:
+                taught += " (" + ", ".join(e.show_only) + " only)"
             self.ai_status.setText(dot(GREEN, f"{e.model_name}{taught} on {e.device_name}"))
         else:
             self.ai_status.setText(dot(AMBER, e.status))
@@ -496,6 +515,9 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self.timer.stop()
+        self.focus_panel.stop()
+        if self.focus_events is not None:
+            self.focus_events.close()
         self.devices_panel.shutdown()   # closes device windows and disconnects
         self.teach.shutdown()
         self.engine.stop()
@@ -508,7 +530,8 @@ class MainWindow(QMainWindow):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Live AI view of the Pi's camera, with control of the Pi.")
-    parser.add_argument("--pi", default="aquapack", help="the Pi's IP address or hostname")
+    parser.add_argument("--pi", default="10.153.4.29",
+                        help="the Pi's IP address or hostname (run `hostname -I` on the Pi if it changes)")
     parser.add_argument("--stream-port", type=int, default=8080)
     parser.add_argument("--cmd-port", type=int, default=5005)
     parser.add_argument("--source",
@@ -520,6 +543,9 @@ def parse_args():
                         help="size the AI looks at; raise to 960 or 1280 (with a higher stream "
                              "resolution) to catch small or distant objects")
     parser.add_argument("--conf", type=float, default=0.5, help="starting confidence threshold")
+    parser.add_argument("--objects", default="laptop,cell phone",
+                        help="comma-separated object types to show, from the model's 80 (default: "
+                             "laptop,cell phone), or 'all'. Objects taught in the Teach tab always show")
     parser.add_argument("--library", default=str(DEFAULT_ROOT),
                         help="folder that stores the objects you teach (default: library/)")
     parser.add_argument("--eog-port",
@@ -530,7 +556,13 @@ def parse_args():
                         help="connect to the MechDog (running mechdog/main.py) over Bluetooth for the Dog tab")
     parser.add_argument("--dog-dry-run", action="store_true",
                         help="Dog tab without a dog: shows the commands but sends nothing")
-    return parser.parse_args()
+    parser.add_argument("--focus", action="store_true",
+                        help="Focus tab: select a device by looking at its flickering box (needs "
+                             "--eog-port and the back-of-head electrodes; see README)")
+    args = parser.parse_args()
+    if args.focus and not args.eog_port:
+        parser.error("--focus needs the headset: add --eog-port COM10 (your board's port)")
+    return args
 
 
 def main():
@@ -549,7 +581,7 @@ def main():
     # The EOG headset connects once, here, before the window opens (as Aram's live.py does).
     eyes = None
     if args.eog_port:
-        eyes = EyeControl(args.eog_port, use_imu=not args.no_imu)
+        eyes = EyeControl(args.eog_port, use_imu=not args.no_imu, use_focus=args.focus)
         if dog is not None:
             eyes.on_tilt = dog.on_tilt   # head tilt steers the dog
         print(f"Connecting to the EOG headset on {args.eog_port} (the board restarts when its port "
@@ -564,10 +596,13 @@ def main():
 
     app = QApplication(sys.argv)
     library = Library(args.library)
+    show_only = None if args.objects.strip().lower() == "all" else         [n.strip() for n in args.objects.split(",") if n.strip()]
     engine = Engine(args.pi, args.stream_port, args.cmd_port, args.source,
-                    args.model, args.imgsz, args.conf, custom_model=library.model_path)
+                    args.model, args.imgsz, args.conf, custom_model=library.model_path,
+                    show_only=show_only)
     engine.eyes = eyes
-    window = MainWindow(engine, log_queue, library, eyes, dog)
+    focus_events = FocusEvents() if args.focus else None   # announces selections on 127.0.0.1:5010
+    window = MainWindow(engine, log_queue, library, eyes, dog, focus_events)
     window.show()
     engine.start()
     sys.exit(app.exec())

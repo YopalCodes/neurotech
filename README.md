@@ -22,6 +22,7 @@ two apps connected at once would keep taking control from each other.
 |---|---|---|
 | `pi/start_stream.sh` | Streams the webcam with `ustreamer` | Only to change resolution or FPS |
 | `pi/command_server.py` | Receives commands; failsafe stop | No |
+| `pi/install_autostart.sh` | Starts the stream and command server on every boot | No |
 | `pi/actions.py` | **What the Pi does for each command** | Yes |
 | `laptop/app.py` | Vision app window | No |
 | `laptop/engine.py` | Video → YOLO → command pipeline | No |
@@ -29,6 +30,8 @@ two apps connected at once would keep taking control from each other.
 | `laptop/teach.py`, `laptop/video_view.py` | Teach tab: photos, boxes, training | No |
 | `laptop/train.py` | Trains the model of your taught objects | No |
 | `laptop/library.py` | Stores taught objects in `library/` | No |
+| `laptop/focus_panel.py` | Focus tab: flickering boxes, training, device selection | No |
+| `eog/focus.py` | Focus selection's filters and classifier (SSVEP + TRCA) | Only to tune it |
 | `library/` | **Your taught objects: photos and trained model** | Through the app |
 | `laptop/devices_panel.py`, `laptop/device_window.py` | Devices tab: connect to and control other computers and phones | No |
 | `remote/` | Device control: phones over ADB, computers running `agent.py` (see `remote/README.md`) | No |
@@ -63,6 +66,30 @@ python3 command_server.py     # commands: port 5005
 Open `http://<pi-ip>:8080/stream` in the laptop's browser to check the video. Stream settings
 can be changed per run, e.g. `RESOLUTION=1280x720 FPS=30 bash start_stream.sh`.
 
+### Start automatically when the Pi turns on
+
+Run this once on the Pi, and from then on you only have to power the Pi on:
+
+```bash
+cd ~/neurotech/pi
+bash install_autostart.sh
+```
+
+It installs both programs as system services. They start by themselves at every boot (the
+stream is up about 20–30 s after power-on) and restart within 3 s if either one crashes or the
+webcam is unplugged and plugged back in. It prints the stream address when it's done.
+
+| Command | What it does |
+|---|---|
+| `bash install_autostart.sh --status` | Shows whether both are running, with their last log lines |
+| `bash install_autostart.sh --restart` | Restarts both, e.g. after `git pull` so the new code runs |
+| `bash install_autostart.sh --remove` | Stops starting them at boot (back to running them by hand) |
+| `journalctl -u watchdog-commands -f` | Live log of the command server (`watchdog-stream` for video) |
+
+To change stream settings, install again with them: `RESOLUTION=1280x720 FPS=30 bash install_autostart.sh`.
+While the services run, don't also start `start_stream.sh` or `command_server.py` by hand: the
+port is already taken, so you'd get "Address already in use".
+
 ## Laptop setup (Windows)
 
 Create the virtual environment **outside** OneDrive or any other synced folder. PyTorch with
@@ -89,7 +116,7 @@ python -c "import torch; print(torch.cuda.is_available())"    # must print True
 ## Vision app
 
 ```
-python laptop/app.py --pi powershell192.168.1.50        # the Pi's IP from `hostname -I`
+python laptop/app.py --pi 192.168.1.50        # the Pi's IP from `hostname -I`
 python laptop/app.py --source 0               # test with the laptop's own webcam, no Pi needed
 ```
 
@@ -97,6 +124,10 @@ The window shows the live video with detection boxes, connection status, frame r
 time per frame, a list of detected objects, and a log of every command sent.
 
 - **AI control** is off at start, so nothing moves until you click it. Esc turns it off.
+- **Only laptops and phones** are detected, listed and offered as targets, plus anything taught
+  in the Teach tab. `--objects all` shows all 80 object types, and
+  `--objects "laptop,cell phone,tv"` picks your own (names from the model's list; the log shows
+  the list if a name is wrong).
 - **Target** chooses which object the AI follows; **Confidence** sets how sure it must be.
 - **Stepper motor** (top of the Drive tab): hold **◀ Spin left** or **Spin right ▶** to turn the
   motor; let go to stop. This overrides the AI. The line under the buttons says if the Pi isn't
@@ -120,6 +151,8 @@ time per frame, a list of detected objects, and a log of every command sent.
   right to steer (more tilt = sharper turn). **STOP DOG** or Esc stops it. Uses Aram's
   `eog/dog_control.py` over Bluetooth; the dog must be running `mechdog/main.py` (see below).
   `--dog-dry-run` shows the commands without a dog.
+- **Focus tab** (start with `--eog-port COM10 --focus`): pick one of four devices by looking at
+  its flickering box. See [Focus selection](#focus-selection-look-at-a-device-to-pick-it) below.
 
 The default model is `yolo11m` in FP16 on the GPU (about 20 ms per frame on an RTX 4060 laptop).
 Options: `--model yolo11s.pt` (faster) or `yolo11l.pt` / `yolo11x.pt` (more accurate),
@@ -304,6 +337,136 @@ script on its own: `cd eog` then `python dog_control.py --port COM10`. Speed and
 `DOG_STRIDE`, `DOG_MAX_TURN`, `STEER_DEADZONE` and `STEER_FULL` in `eog/config.py`. The Dog tab
 turns up to 30° (the dog's maximum) and shortens the stride while turning, down to
 `DOG_TURN_STRIDE` (40 mm) at a full turn, for a tighter circle.
+
+## Focus selection (look at a device to pick it)
+
+The Focus tab opens a window with four boxes, one per device, each flickering at its own rate
+(6.67, 8.57, 10 and 12 times a second). Whatever you look at, the visual cortex at the back of
+your head ripples at the same rate (a *steady-state visually evoked potential*, SSVEP).
+Electrodes there pick it up, and a classifier trained on two minutes of your own data
+works out which box you're looking at. The method and settings follow NeuroPawn's SSVEP-TRCA
+tutorial (same frequencies, timing, filters and ensemble-TRCA classifier), using six channels so
+the eye electrodes stay on channels 5 and 6.
+
+Each "look" takes 2 s: the boxes flicker for 1.5 s, then pause for 0.5 s. A device is selected
+after **2 matching looks in a row** (about 4 s), so one misread doesn't select anything. Each
+selection is announced to other programs on this laptop (the device-access app) as a JSON
+message; see step 7.
+
+> ⚠ **Flicker at these rates can trigger seizures in people with photosensitive epilepsy.**
+> Don't use Focus if that applies to you, and stop if you feel unwell.
+
+### Step by step
+
+**1. Put on the back-of-head electrodes** (the eye electrodes on channels 5 and 6 stay as they are).
+
+| Knight channel | Site | Where on the head |
+|---|---|---|
+| 1 | Oz | Midline, a finger-width above the bump at the back of the skull (the inion) |
+| 2 | O1 | 2–3 cm left of Oz |
+| 3 | O2 | 2–3 cm right of Oz |
+| 4 | PO7 | About 3 cm up and 3 cm further out from O1 |
+| 7 | PO8 | About 3 cm up and 3 cm further out from O2 |
+| 8 | POz | Midline, about 3 cm above Oz |
+| `COMM` | Reference | Ear clip on one earlobe |
+| `RLD` | Bias | Ear clip on the other earlobe (NeuroPawn's setup); the forehead or mastoid spot used for the eyes also works |
+
+- Connect each of these electrodes to its channel's **P** input (`1P`, `2P`, `3P`, `4P`, `7P`, `8P`).
+- Set the board's slide switches:
+  - channels **1, 2, 3, 4, 7 and 8 away from the header**, which turns on the common
+    reference (`COMM`);
+  - channels **5 and 6 toward the header**, so the eye electrodes keep using their own N inputs.
+- Part the hair under each electrode and use gel. Hair is the most common reason for poor
+  accuracy, and Oz, O1 and O2 matter most.
+
+**2. Start the app** with the headset and `--focus`:
+
+```powershell
+cd "$HOME\OneDrive\Desktop\Programming Projects\Neurotech"
+& $HOME\venvs\neurotech\Scripts\python.exe laptop\app.py --pi <the Pi's IP> --eog-port COM10 --focus
+```
+
+The first time, install the classifier library:
+`& $HOME\venvs\neurotech\Scripts\python.exe -m pip install meegkit`.
+
+Startup takes about half a minute longer than usual. The app switches on the six extra
+channels, checks each one is really sending, and loads the classifier. Head tilt calibration
+prompts appear in the terminal as usual (`--no-imu` skips them). In the **Focus** tab,
+**Electrodes** should turn green with "channels 1 (Oz), 2 (O1), ... live". If it's red, a channel
+didn't come on: close the app, unplug and replug the board, and start again.
+
+**3. Set up the screen.**
+- Keep the laptop plugged in. On battery, Windows can drop the display to 60 Hz and the GPU slows down.
+- Sit where you'll sit when using it, about an arm's length from the screen.
+- Use steady lighting, with no flickering lights or TV in view.
+- Close games, videos and other heavy programs.
+
+**4. Name the devices.** In the Focus tab, type a name for each box (top-left, top-right,
+bottom-left, bottom-right), such as `Kyle's laptop` or `Phone`. The names are saved for next time.
+
+**5. Train: about 2 minutes, once each time you put the headset on.** Click **Train**. The window
+fills the screen, and each trial goes:
+1. One box gets a **red outline** for 1 s. Look at its centre.
+2. All four boxes flicker for 1.5 s. Keep looking at the red one, and don't blink.
+3. A 0.5 s pause. Blink now if you need to.
+
+There are 6 blocks, and each one shows every box once in random order (24 trials). At the end it
+trains and shows something like "Done: 6 blocks, 92% accurate on blocks it didn't train on".
+Press Esc to close the window; Esc during training stops it, and the previous training stays
+in use.
+- **90% or more:** great.
+- **70–90%:** usable. The 2-look confirmation catches most mistakes.
+- **Below 70%:** re-seat the electrodes with more gel (Oz, O1 and O2 first), check the
+  **Display** row (step 6), and train again.
+
+Training is saved in `eog/focus_data/<date_time>/`. The app loads the newest full training when
+it starts.
+
+**6. Select.** Click **Start selecting**, then look at the box of the device you want and keep
+looking. After two matching looks the box gets a green outline and ✔. The app announces the
+device and shows it in the Focus tab under **Last selected** and in the log.
+- To pick the same device again, look at another box first.
+- Esc stops selecting.
+- Eye control of the motor turns off while a Focus window is open, because looking between the
+  boxes would steer it. Turn it back on in the Eyes tab afterwards.
+- The **Display** row shows the screen's measured refresh rate and the share of late frames. It
+  should say about 165 Hz with under 5% late. Otherwise, plug in, close other programs, and keep
+  **Full screen** checked.
+- Unchecking **Require 2 matching looks** selects after a single look (2 s). It's faster but
+  makes more mistakes.
+
+**7. Receive selections in another program.** The app announces each selection on
+`127.0.0.1:5010` (this laptop only), as one JSON line per selection:
+
+```json
+{"event": "focus_select", "box": 2, "position": "bottom-left", "device": "Kyle's laptop", "frequency": 10.0, "time": "2026-11-08T09:31:02"}
+```
+
+A minimal listener (any language that can open a TCP socket works):
+
+```python
+import json, socket
+
+with socket.create_connection(("127.0.0.1", 5010)) as s:
+    for line in s.makefile("r", encoding="utf-8"):
+        event = json.loads(line)
+        print("Selected:", event["device"])
+```
+
+The Focus tab's **Announced to** row shows how many programs are listening. Start the app first:
+the listener can't connect until the app is running (only one Watchdog app can hold port 5010).
+
+### If it doesn't work
+
+| Problem | Fix |
+|---|---|
+| Focus tab says "off" | Start the app with `--eog-port COM10 --focus` |
+| Electrodes red: channels didn't come on | Close the app, unplug and replug the board, start again |
+| Train / Start selecting greyed out | Wait for Electrodes to turn green. Start selecting also needs a finished training |
+| Low accuracy | More gel and less hair under Oz, O1 and O2. Keep still, and don't blink during the flicker. Check the Display row |
+| "The flicker window isn't being drawn" | Keep the window visible and not minimised; update the graphics driver |
+| "Missed the EEG for focus trial ..." in the log | The headset fell behind; occasional misses are skipped. If it's constant, restart and replug the board |
+| Wrong device picked repeatedly | Train again; check the box names in step 4 match the devices you mean |
 
 ## Pi commands and safety
 

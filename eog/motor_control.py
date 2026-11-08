@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
 )
 
 import board as eog_board
+import channel_check
 import config
 import features
 from imu import HeadTilt
@@ -285,7 +286,7 @@ def main():
     model = saved["model"]
 
     print("Connecting to the board (it restarts when the port opens)...", flush=True)
-    board, board_id = eog_board.connect(args.port, args.synthetic)
+    board, board_id = channel_check.connect(args.port, args.synthetic)
     fs = BoardShim.get_sampling_rate(board_id)
     if fs != saved["fs"]:
         print(f"Warning: model trained at {saved['fs']} Hz but board runs at {fs} Hz")
