@@ -15,6 +15,9 @@ eeg/recordings/
 # Vision app: objects taught in the Teach tab (photos of your surroundings) and their model
 library/
 
+# EOG (Aram's eog-brainflow branch): recordings made on the wrong channels (noise only)
+eog/data/old_wrong_channels/
+
 # OS / editor
 .DS_Store
 Thumbs.db

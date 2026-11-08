@@ -6,9 +6,10 @@ It runs in its own thread so the window never freezes. The GUI sets the controls
 
 Which command is sent:
   1. a manual button is held  -> that command, 20 times a second
-  2. AI control is on         -> decide()'s command, after each new frame
+  2. eye control is on        -> what the eyes last asked for (eye_control.py), 20 times a second
+  3. AI control is on         -> decide()'s command, after each new frame
                                  (nothing if the video or AI stalls, so the Pi's failsafe stops it)
-  3. otherwise                -> "stop", 20 times a second
+  4. otherwise                -> "stop", 20 times a second
 Manual and "stop" commands come from their own small thread, so a slow frame or a model
 reload never makes a held button stutter.
 
@@ -77,6 +78,8 @@ class Engine:
 
         # Controls, set by the GUI.
         self.ai_enabled = False   # off at start: nothing moves until you turn it on
+        self.eye_control = False  # when on, the motor follows the eyes
+        self.eyes = None          # EyeControl, if the app was started with --eog-port
         self.manual_cmd = None
         self.target = TARGET
         self.conf = conf
@@ -194,7 +197,7 @@ class Engine:
 
             if ai_cmd is not None:
                 with self._send_lock:
-                    if self.ai_enabled and not self.manual_cmd:
+                    if self.ai_enabled and not self.manual_cmd and not self.eye_control:
                         self._send(ai_cmd, "AI")
 
     def _command_loop(self):
@@ -204,6 +207,8 @@ class Engine:
                 manual = self.manual_cmd
                 if manual:
                     self._send({"cmd": manual}, "manual")
+                elif self.eye_control and self.eyes is not None:
+                    self._send({"cmd": self.eyes.state}, "eyes")
                 elif not self.ai_enabled:
                     self._send({"cmd": "stop"}, "AI control off")
             time.sleep(0.05)

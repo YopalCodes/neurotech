@@ -86,8 +86,8 @@ python -c "import torch; print(torch.cuda.is_available())"    # must print True
 
 ## Vision app
 
-```powershell
-python laptop/app.py --pi 192.168.1.50        # the Pi's IP from `hostname -I`
+```
+python laptop/app.py --pi powershell192.168.1.50        # the Pi's IP from `hostname -I`
 python laptop/app.py --source 0               # test with the laptop's own webcam, no Pi needed
 ```
 
@@ -99,6 +99,16 @@ time per frame, a list of detected objects, and a log of every command sent.
 - **Stepper motor** (top of the Drive tab): hold **◀ Spin left** or **Spin right ▶** to turn the
   motor; let go to stop. This overrides the AI. The line under the buttons says if the Pi isn't
   connected.
+- **Eyes tab** (start the app with `--eog-port COM10`): turn on **Eye control** to steer the motor
+  with the NeuroPawn headset: look right or left to spin that way, blink to stop. It uses Aram's
+  EOG pipeline and your trained model (see the EOG section below), runs in its own process so it
+  doesn't slow the camera AI, and connects to the headset once at startup. Eye control and AI
+  control can't both be on; a held Spin button overrides both; Esc turns both off.
+  `--eog-port playback:eog/data/<recording>.csv` replays a recording instead of the headset.
+  Head tilt (the headset's IMU) works as in Aram's `live.py`: after connecting, follow the
+  calibration prompts in the terminal (hold still, tilt forward, tilt right). The Eyes tab then
+  shows your head tilt, and eye events are ignored while your head turns fast, so turning your
+  head doesn't register as a glance. `--no-imu` skips it.
 
 The default model is `yolo11m` in FP16 on the GPU (about 20 ms per frame on an RTX 4060 laptop).
 Options: `--model yolo11s.pt` (faster) or `yolo11l.pt` / `yolo11x.pt` (more accurate),
@@ -193,6 +203,44 @@ The app uses the standard `brainflow` package from pip, which already supports t
 board (125 Hz, 8 channels). NeuroPawn's fork (github.com/NeuroPawn/brainflow) differs only in
 its microvolt scale factor; that changes the numbers on the plots, not detection, because the
 app learns from your own recordings.
+
+## EOG motor control (NeuroPawn, Aram's classifier)
+
+`eog/` is Aram's EOG pipeline from the `eog-brainflow` branch (see `eog/README.md` for
+recording, training and electrode placement). `eog/motor_control.py` runs his live detection
+(`board.py`, `features.py`, the model from `train.py`, and `live.py`'s timing) and sends the
+result to the Pi. One difference from `live.py`: an event fires as soon as one check passes the
+certainty threshold, instead of three in a row, so short blinks aren't missed.
+
+| Eyes | Motor |
+|---|---|
+| Look right | Spins right, and keeps spinning |
+| Look left | Spins left, and keeps spinning |
+| Blink | Stops |
+
+```powershell
+cd eog
+python motor_control.py --port COM10 --pi <the Pi's IP>   # the headset's COM port (Device Manager → Ports)
+python motor_control.py --synthetic --pi <the Pi's IP>    # no headset
+```
+
+It handles the board exactly like `live.py`: it connects once at startup and releases the board
+when you close it. If connecting fails, or the board stops sending data, close it, unplug and
+replug the board, and run it again. Close the NeuroPawn Visualizer first (only one program can
+use the port). The window shows the motor state, the detection probabilities and the Pi
+connection. Its Left / Stop / Right buttons
+(or the ← → keys, and B or Space to stop) control the motor without the headset. The motor state
+is sent to the Pi 10 times a second, so the Pi's failsafe stops the motor if this program,
+the headset or the Wi-Fi stops.
+
+Head tilt (the IMU) works as in Aram's `live.py`: after connecting, follow the calibration prompts
+in the terminal (hold still, tilt forward, tilt right). The window shows your head tilt, and eye
+events are ignored while your head turns faster than 60°/s and for 1.5 s after. `--no-imu` skips it.
+
+The model in `eog/models/` is trained on one person's recordings in `eog/data/` (Aram's original
+examples and model are kept in `eog/data/aram_examples/` and `eog/models/aram_*`). For good
+accuracy on someone else, record and train with `record.py` and `train.py` first, as his README
+describes.
 
 ## Pi commands and safety
 

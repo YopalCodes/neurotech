@@ -29,7 +29,7 @@ log = logging.getLogger("actions")
 PINS = (17, 18, 27, 22)   # IN1, IN2, IN3, IN4
 STEP_DELAY = 0.002        # seconds per half-step: 2 ms is about 7 RPM on a 28BYJ-48. Smaller = faster;
                           # below about 1 ms it stalls.
-REVERSE = False           # set to True if "left" and "right" spin the wrong way
+REVERSE = True            # True: swapped for this motor's wiring ("right" was spinning left)
 
 # Half-step sequence for a unipolar stepper on a ULN2003: smoother and stronger than full steps.
 SEQUENCE = (

@@ -1,8 +1,10 @@
 """Desktop app: live video from the Pi with AI detections, status, and controls, plus a
-Teach tab for training the camera to recognise your own objects.
+Teach tab for training the camera to recognise your own objects, and an Eyes tab for steering
+the motor with the NeuroPawn EOG headset.
 
     python laptop/app.py --pi 192.168.1.50
     python laptop/app.py --source 0        # use this laptop's webcam instead of the Pi
+    python laptop/app.py --eog-port COM10  # also connect the EOG headset (Eyes tab)
 """
 
 import argparse
@@ -20,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from engine import Engine, describe
+from eye_control import EyeControl, EyePanel
 from library import DEFAULT_ROOT, Library
 from teach import TeachPanel
 from video_view import VideoView
@@ -43,9 +46,10 @@ class QueueLogHandler(logging.Handler):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, engine, log_queue, library):
+    def __init__(self, engine, log_queue, library, eyes=None):
         super().__init__()
         self.engine = engine
+        self.eyes = eyes
         self.log_queue = log_queue
         self.shown_id = None
         self.names_version = 0
@@ -131,7 +135,7 @@ class MainWindow(QMainWindow):
         self.motor_status.setWordWrap(True)
         motor.addWidget(self.motor_status)
 
-        hint = QLabel("Esc turns AI control off.")
+        hint = QLabel("Esc turns AI control and eye control off.")
         hint.setStyleSheet(f"color: {GREY};")
 
         control_box = QGroupBox("Control")
@@ -153,9 +157,12 @@ class MainWindow(QMainWindow):
         drive_layout.addWidget(control_box)
 
         self.teach = TeachPanel(library, engine, self.video)
+        self.eye_panel = EyePanel(eyes)
+        self.eye_panel.toggle.toggled.connect(self.set_eyes)
         self.tabs = QTabWidget()
         self.tabs.addTab(drive, "Drive")
         self.tabs.addTab(self.teach, "Teach")
+        self.tabs.addTab(self.eye_panel, "Eyes")
         self.tabs.currentChanged.connect(lambda _: self.teach.cancel_photo())
 
         side = QWidget()
@@ -185,6 +192,8 @@ class MainWindow(QMainWindow):
 
     def set_ai(self, on):
         self.engine.ai_enabled = on
+        if on and hasattr(self, "eye_panel"):
+            self.eye_panel.toggle.setChecked(False)   # only one of AI and eyes steers the motor
         if on:
             self.ai_button.setText("AI control: ON  (click or Esc to stop)")
             self.ai_button.setStyleSheet(f"background: {GREEN}; color: white; font-weight: bold;")
@@ -200,11 +209,20 @@ class MainWindow(QMainWindow):
         self.engine.conf = value / 100
         self.conf_label.setText(f"Confidence ≥ {value / 100:.2f}:")
 
+    def set_eyes(self, on):
+        if on:
+            self.eyes.state = "stop"        # start still: only a new look left/right moves it
+            self.ai_button.setChecked(False)
+        self.engine.eye_control = on
+
     def set_manual(self, name):
         self.engine.manual_cmd = name
+        if name is None and self.engine.eye_control:
+            self.eyes.state = "stop"        # after a held Spin button, stay stopped
 
     def escape(self):
         self.ai_button.setChecked(False)
+        self.eye_panel.toggle.setChecked(False)
         self.teach.cancel_photo()
 
     def space(self):
@@ -244,6 +262,7 @@ class MainWindow(QMainWindow):
         if e.names_version != self.names_version:
             self.names_version = e.names_version
             self.fill_targets()
+        self.eye_panel.refresh()
 
         now = time.monotonic()
         video_live = e.stream is not None and now - e.stream.last_frame_time < 1.0
@@ -293,6 +312,10 @@ class MainWindow(QMainWindow):
                 f"with --pi &lt;the Pi's IP&gt;.</span>")
         elif e.manual_cmd and e.sent and e.sent[1] == "manual":
             self.motor_status.setText(f"<b style='color:{GREEN}'>Spinning {e.manual_cmd}...</b>")
+        elif e.eye_control:
+            doing = "stopped" if self.eyes.state == "stop" else f"spinning {self.eyes.state}"
+            self.motor_status.setText(f"Your eyes are steering the motor (Eyes tab): <b>{doing}</b>. "
+                                      "Hold a button to override.")
         elif e.ai_enabled:
             self.motor_status.setText("The AI is steering the motor. Hold a button to override it.")
         else:
@@ -335,6 +358,8 @@ class MainWindow(QMainWindow):
         self.timer.stop()
         self.teach.shutdown()
         self.engine.stop()
+        if self.eyes is not None:
+            self.eyes.close()   # stop_stream() + release_session(), as live.py does on exit
         event.accept()
 
 
@@ -354,6 +379,10 @@ def parse_args():
     parser.add_argument("--conf", type=float, default=0.5, help="starting confidence threshold")
     parser.add_argument("--library", default=str(DEFAULT_ROOT),
                         help="folder that stores the objects you teach (default: library/)")
+    parser.add_argument("--eog-port",
+                        help="the NeuroPawn EOG headset's serial port, e.g. COM10, for the Eyes tab")
+    parser.add_argument("--no-imu", action="store_true",
+                        help="skip the headset's head tilt (no calibration, no head-movement filter)")
     return parser.parse_args()
 
 
@@ -367,11 +396,26 @@ def main():
     console.setFormatter(logging.Formatter("%(asctime)s %(name)s: %(message)s", "%H:%M:%S"))
     logging.basicConfig(level=logging.INFO, handlers=[console, gui_handler])
 
+    # The EOG headset connects once, here, before the window opens (as Aram's live.py does).
+    eyes = None
+    if args.eog_port:
+        eyes = EyeControl(args.eog_port, use_imu=not args.no_imu)
+        print(f"Connecting to the EOG headset on {args.eog_port} (the board restarts when its port "
+              "opens)...", flush=True)
+        if eyes.use_imu:
+            print("Then head tilt calibration: follow the prompts that appear here.", flush=True)
+        try:
+            eyes.connect()
+        except Exception as e:
+            eyes.error = str(e)
+            logging.getLogger("eyes").error(eyes.error)
+
     app = QApplication(sys.argv)
     library = Library(args.library)
     engine = Engine(args.pi, args.stream_port, args.cmd_port, args.source,
                     args.model, args.imgsz, args.conf, custom_model=library.model_path)
-    window = MainWindow(engine, log_queue, library)
+    engine.eyes = eyes
+    window = MainWindow(engine, log_queue, library, eyes)
     window.show()
     engine.start()
     sys.exit(app.exec())
