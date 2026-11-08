@@ -46,8 +46,13 @@ a strong one and only run the agent while you need it.
 
 ## Android phones and tablets
 
-No app is needed on the phone; it uses ADB (Android platform-tools must be
-installed on the main computer).
+No app is installed on the phone. The controller uses ADB (Android platform-tools must
+be installed on the main computer). While you're connected, it runs
+[scrcpy](https://github.com/Genymobile/scrcpy)'s small server from the phone's temp folder.
+That gives a smooth ~25–30 fps live view and instant touch and typing. The server
+(v3.1, Apache-2.0) downloads into `vendor/` on first use and is checked against
+scrcpy's published SHA-256. If it can't run, the controller falls back to
+`screenrecord` or screenshots plus `adb input`, which is slower.
 
 1. On the phone, open Settings → About phone and tap **Build number** 7 times
    to unlock Developer options.
@@ -58,21 +63,28 @@ installed on the main computer).
 | On the screen | Phone |
 |---|---|
 | click | tap |
-| drag | swipe (played back when you release) |
-| hold ½ s | long press |
+| drag | swipe (follows the mouse live) |
+| hold | long press |
 | right-click / middle-click | Back / Home |
 | wheel | scroll |
-| typing | text input, plus Enter, Backspace, arrows and Ctrl+letter (Android 13+) |
+| typing | text input, plus Enter, Backspace, arrows and Ctrl+letter |
 
 The toolbar has Back, Home, Recents, Power and Volume buttons. **Open app...**
 lists the phone's apps.
 
-**Wi-Fi instead of USB (Android 11+):**
-1. Turn on **Wireless debugging** and choose **Pair device with pairing code**.
-2. Run `adb pair <ip>:<pairing port>` once on the main computer.
-3. Click **Phone over Wi-Fi...** with the `<ip>:<port>` shown on the Wireless debugging screen.
+### Wireless
 
-The screen streams at up to about 30 fps, using Android's `screenrecord`. If a
-phone doesn't support it, the controller falls back to screenshots at about
-1–3 fps. Taps take about 0.2–0.5 s to land, because each `adb input` command starts
-a small process on the phone.
+There are two ways to connect. Both need the phone and the main computer on the same
+network, and some networks block devices from reaching each other. Over Wi-Fi the
+stream drops to 1024 px at 2 Mbit/s, which kept about 24 fps on eduroam.
+
+- **USB phone → Wi-Fi (quickest):** with the phone plugged in, select it and click
+  **USB phone → Wi-Fi**, then unplug it. A second entry, `(ip:5555)`, appears;
+  connect to that one. This lasts until the phone reboots. Only computers the phone
+  has already authorized can connect. To turn it off early, plug in and run
+  `adb usb`, or reboot the phone.
+- **Pair phone (Wi-Fi)... (no cable, Android 11+):** this uses Android's own
+  encrypted wireless debugging.
+  1. Open Developer options → **Wireless debugging** → **Pair device with pairing code**.
+  2. Enter the pairing address and code, then the address shown on the main
+     Wireless debugging screen.

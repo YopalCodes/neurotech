@@ -7,3 +7,4 @@ eog/data/old_wrong_channels/
 
 # Saved device list (local network addresses)
 remote/devices.json
+remote/vendor/

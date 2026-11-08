@@ -14,14 +14,18 @@ A later camera-based selector only needs DeviceManager.select().
 """
 
 import glob
+import hashlib
 import io
 import json
 import os
+import random
 import shutil
 import socket
+import struct
 import subprocess
 import threading
 import time
+import urllib.request
 from pathlib import Path
 
 from PIL import Image
@@ -179,22 +183,80 @@ def shell_quote(text):
     return "'" + text.replace("'", "'\\''") + "'"
 
 
+# scrcpy's on-device server (Apache-2.0, github.com/Genymobile/scrcpy) streams the
+# screen as H.264 and injects input instantly. It works on phones whose Android
+# build lacks `screenrecord`. Downloaded once and checked against the hash that
+# scrcpy's own install_release.sh pins for this version.
+SCRCPY_VERSION = "3.1"
+SCRCPY_URL = f"https://github.com/Genymobile/scrcpy/releases/download/v{SCRCPY_VERSION}/scrcpy-server-v{SCRCPY_VERSION}"
+SCRCPY_SHA256 = "958f0944a62f23b1f33a16e9eb14844c1a04b882ca175a738c16d23cb22b86c0"
+SCRCPY_REMOTE = "/data/local/tmp/neurotech-scrcpy-server.jar"
+VENDOR_DIR = Path(__file__).parent / "vendor"
+
+# scrcpy control messages (server/.../control/ControlMessageReader.java, v3.1)
+MSG_KEYCODE, MSG_TEXT, MSG_TOUCH = 0, 1, 2
+ACTION_DOWN, ACTION_UP, ACTION_MOVE = 0, 1, 2
+FINGER = -2              # POINTER_ID_GENERIC_FINGER
+META_CTRL = 0x1000 | 0x2000  # META_CTRL_ON | META_CTRL_LEFT_ON
+KEYCODE_A = 29
+
+
+def scrcpy_server():
+    path = VENDOR_DIR / f"scrcpy-server-v{SCRCPY_VERSION}"
+    if not path.exists():
+        data = urllib.request.urlopen(SCRCPY_URL, timeout=30).read()
+        if hashlib.sha256(data).hexdigest() != SCRCPY_SHA256:
+            raise RuntimeError("scrcpy-server download failed its checksum; not using it")
+        VENDOR_DIR.mkdir(exist_ok=True)
+        path.write_bytes(data)
+    return path
+
+
+def to_image(frame):
+    """Decoded video frame -> PIL image. Some phone encoders tag frames with a
+    colorspace FFmpeg's converter rejects; treat those as standard HD (BT.709)."""
+    try:
+        return frame.to_image()
+    except OSError:
+        return frame.reformat(format="rgb24", src_colorspace="ITU709", dst_colorspace="ITU709").to_image()
+
+
+def free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 class AndroidDevice(Device):
-    """An Android phone/tablet over ADB (USB or Wi-Fi). Needs USB debugging enabled."""
+    """An Android phone/tablet over ADB (USB or Wi-Fi). Needs USB debugging enabled.
+
+    Normally runs scrcpy's server on the phone for video and input. If that
+    fails, falls back to `screenrecord` or `screencap` for video and
+    `adb shell input` for control (slower, and drags replay on release).
+    """
     kind = "android"
     actions = ("back", "home", "recents", "power", "volume_up", "volume_down")
 
-    def __init__(self, name, serial, use_screencap=False):
+    def __init__(self, name, serial):
         super().__init__(name)
         self.serial = serial
-        self.use_screencap = use_screencap
+        # Wi-Fi links (serial "ip:port") get a lighter stream than USB.
+        wireless = ":" in serial
+        self.max_size = 1024 if wireless else 1600
+        self.bit_rate = 2_000_000 if wireless else 8_000_000
+        self.mode = None           # "scrcpy", "screenrecord" or "screencap"
         self.size = (1080, 1920)   # physical portrait size, read on connect
         self.shell = None
-        self.stream = None
+        self.server = None         # scrcpy server process (adb shell)
+        self.stream = None         # screenrecord process
+        self.control = None        # scrcpy control socket
+        self.forward_port = None
         self.lock = threading.Lock()
+        self.control_lock = threading.Lock()
         self.text_buffer = ""
         self.ctrl = False
         self.down = None           # (x, y, time) of the current press
+        self.ready = threading.Event()
 
     # -- connection --
 
@@ -210,23 +272,105 @@ class AndroidDevice(Device):
                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True,
                                       creationflags=NO_WINDOW)
         self.connected = True
+        self.ready.clear()
         threading.Thread(target=self._capture, daemon=True).start()
         threading.Thread(target=self._flush_text_loop, daemon=True).start()
+        self.ready.wait(10)  # until the video mode is decided, so input goes the right way
 
     def close(self):
         self.connected = False
-        for proc in (self.stream, self.shell):
+        for s in (self.control,):
+            if s:
+                s.close()
+        self.control = None
+        for proc in (self.server, self.stream, self.shell):
             if proc and proc.poll() is None:
                 proc.kill()
+        if self.forward_port:
+            try:
+                adb("forward", "--remove", f"tcp:{self.forward_port}", serial=self.serial)
+            except Exception:  # noqa: BLE001
+                pass
+            self.forward_port = None
 
     # -- screen --
 
     def _capture(self):
+        try:
+            self._capture_scrcpy()
+        except Exception as e:  # noqa: BLE001
+            self.error = f"scrcpy unavailable ({e}); using slower fallback"
+        self.control = None
         while self.connected:
-            got_frames = False if self.use_screencap else self._capture_h264()
-            if not got_frames and self.connected:
-                self.use_screencap = True  # screenrecord unsupported: fall back to stills
+            self.mode = "screenrecord"
+            self.ready.set()
+            if not self._capture_h264() and self.connected:
+                self.mode = "screencap"
                 self._capture_screencap()
+
+    def _capture_scrcpy(self):
+        adb("push", str(scrcpy_server()), SCRCPY_REMOTE, serial=self.serial, timeout=30)
+        scid = f"{random.randrange(1 << 31):08x}"
+        self.forward_port = free_port()
+        adb("forward", f"tcp:{self.forward_port}", f"localabstract:scrcpy_{scid}", serial=self.serial)
+        self.server = subprocess.Popen(
+            [find_adb(), "-s", self.serial, "shell",
+             f"CLASSPATH={SCRCPY_REMOTE} app_process / com.genymobile.scrcpy.Server {SCRCPY_VERSION} "
+             f"scid={scid} log_level=warn tunnel_forward=true audio=false control=true cleanup=true "
+             f"raw_stream=true clipboard_autosync=false max_size={self.max_size} max_fps=30 "
+             f"video_bit_rate={self.bit_rate}"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=NO_WINDOW)
+
+        # The server accepts the video socket, then the control socket, then streams.
+        # Until it's listening, adb accepts and immediately closes our connection.
+        deadline = time.monotonic() + 10
+        video = first = None
+        while time.monotonic() < deadline and self.connected:
+            video = control = None
+            try:
+                video = socket.create_connection(("127.0.0.1", self.forward_port))
+                control = socket.create_connection(("127.0.0.1", self.forward_port))
+                video.settimeout(3)
+                first = video.recv(65536)
+            except OSError:  # not listening yet: refused, reset or timed out
+                first = b""
+            if first:
+                control.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                self.control = control
+                break
+            for s in (video, control):
+                if s:
+                    s.close()
+            time.sleep(0.3)
+        if not first:
+            raise RuntimeError("server didn't start")
+
+        import av
+
+        self.mode = "scrcpy"
+        self.ready.set()
+        threading.Thread(target=self._drain_control, args=(self.control,), daemon=True).start()
+        codec = av.CodecContext.create("h264", "r")
+        video.settimeout(None)
+        chunk = first
+        try:
+            while self.connected and chunk:
+                for packet in codec.parse(chunk):
+                    for frame in codec.decode(packet):
+                        self._set_frame(to_image(frame))
+                chunk = video.recv(65536)
+        finally:
+            video.close()
+        if self.connected:
+            raise RuntimeError("video stream ended")
+
+    def _drain_control(self, sock):
+        """The server can send device messages; read and ignore them so its buffer never fills."""
+        try:
+            while sock.recv(4096):
+                pass
+        except OSError:
+            pass
 
     def _capture_h264(self):
         """Stream H.264 from screenrecord (smooth, ~30 fps). Restarts when it hits its time limit."""
@@ -245,7 +389,7 @@ class AndroidDevice(Device):
                     break
                 for packet in codec.parse(chunk):
                     for frame in codec.decode(packet):
-                        self._set_frame(frame.to_image())
+                        self._set_frame(to_image(frame))
                         got = True
         except Exception as e:  # noqa: BLE001
             self.error = f"video stream error: {e}"
@@ -264,7 +408,37 @@ class AndroidDevice(Device):
             except Exception:  # noqa: BLE001
                 time.sleep(0.5)
 
-    # -- input --
+    # -- scrcpy input --
+
+    def _send_control(self, data):
+        try:
+            with self.control_lock:
+                self.control.sendall(data)
+        except (OSError, AttributeError):
+            self.error = "control connection lost"
+
+    def _touch(self, action, x, y):
+        if self.frame is None:
+            return
+        w, h = self.frame.size  # the server only accepts positions in the current video size
+        px, py = round(x * (w - 1)), round(y * (h - 1))
+        pressure = 0 if action == ACTION_UP else 0xFFFF
+        self._send_control(struct.pack(">BBqiiHHHii", MSG_TOUCH, action, FINGER, px, py, w, h, pressure, 0, 0))
+
+    def _keycode(self, action, keycode, meta=0):
+        self._send_control(struct.pack(">BBiii", MSG_KEYCODE, action, keycode, 0, meta))
+
+    def _press(self, keycode, meta=0):
+        self._keycode(ACTION_DOWN, keycode, meta)
+        self._keycode(ACTION_UP, keycode, meta)
+
+    def _inject_text(self, text):
+        data = text.encode()
+        for i in range(0, len(data), 300):  # server limit per message
+            part = data[i:i + 300]
+            self._send_control(struct.pack(">BI", MSG_TEXT, len(part)) + part)
+
+    # -- adb fallback input --
 
     def _run(self, command):
         if self.shell and self.shell.poll() is None:
@@ -281,9 +455,18 @@ class AndroidDevice(Device):
             w, h = h, w  # landscape
         return round(x * (w - 1)), round(y * (h - 1))
 
+    # -- input API --
+
+    def pointer_move(self, x, y):
+        if self.control and self.down:
+            self._touch(ACTION_MOVE, x, y)
+
     def pointer_down(self, x, y, button="left"):
-        if button == "left":
-            self.down = (x, y, time.monotonic())
+        if button != "left":
+            return
+        self.down = (x, y, time.monotonic())
+        if self.control:
+            self._touch(ACTION_DOWN, x, y)
 
     def pointer_up(self, x, y, button="left"):
         self._flush_text()
@@ -295,6 +478,9 @@ class AndroidDevice(Device):
             return
         x0, y0, t0 = self.down
         self.down = None
+        if self.control:
+            self._touch(ACTION_UP, x, y)
+            return
         held_ms = int((time.monotonic() - t0) * 1000)
         (px0, py0), (px1, py1) = self._pixels(x0, y0), self._pixels(x, y)
         moved = abs(x - x0) > 0.02 or abs(y - y0) > 0.02
@@ -305,28 +491,51 @@ class AndroidDevice(Device):
 
     def scroll(self, dy, x=0.5, y=0.5):
         self._flush_text()
+        if self.control:
+            def drag():  # a short finger drag; wheel up = content moves down
+                y1 = max(0.0, min(1.0, y + (0.25 if dy > 0 else -0.25)))
+                self._touch(ACTION_DOWN, x, y)
+                for i in range(1, 9):
+                    self._touch(ACTION_MOVE, x, y + (y1 - y) * i / 8)
+                    time.sleep(0.015)
+                time.sleep(0.05)  # pause before lifting so it scrolls without flinging far
+                self._touch(ACTION_UP, x, y1)
+            threading.Thread(target=drag, daemon=True).start()
+            return
         px, py = self._pixels(x, y)
         _, h = self._pixels(1, 1)
-        dist = int(0.25 * h) * (1 if dy > 0 else -1)  # wheel up = content moves down
+        dist = int(0.25 * h) * (1 if dy > 0 else -1)
         self._run(f"input swipe {px} {py} {px} {max(0, min(h, py + dist))} 150")
 
     def key_down(self, key):
         if key in ("ctrl", "ctrl_r"):
             self.ctrl = True
         elif len(key) == 1 and self.ctrl and key.isalpha():
-            self._flush_text()  # Ctrl+letter (Android 13+): CTRL_LEFT + KEYCODE_A..Z
-            self._run(f"input keycombination 113 {29 + ord(key.lower()) - ord('a')}")
+            code = KEYCODE_A + ord(key.lower()) - ord("a")
+            if self.control:
+                self._press(code, META_CTRL)
+            else:  # Android 13+ only
+                self._flush_text()
+                self._run(f"input keycombination 113 {code}")
         elif len(key) == 1:
             self.type_text(key)
         elif key in ANDROID_KEYS:
-            self._flush_text()
-            self._run(f"input keyevent {ANDROID_KEYS[key]}")
+            if self.control:
+                self._keycode(ACTION_DOWN, ANDROID_KEYS[key])
+            else:
+                self._flush_text()
+                self._run(f"input keyevent {ANDROID_KEYS[key]}")
 
     def key_up(self, key):
         if key in ("ctrl", "ctrl_r"):
             self.ctrl = False
+        elif self.control and key in ANDROID_KEYS:
+            self._keycode(ACTION_UP, ANDROID_KEYS[key])
 
     def type_text(self, text):
+        if self.control and text.isascii():
+            self._inject_text(text)
+            return
         # `input text` starts a JVM each call, so batch keystrokes typed close together.
         with self.lock:
             self.text_buffer += text
@@ -346,7 +555,10 @@ class AndroidDevice(Device):
     def action(self, name):
         if name in ANDROID_ACTIONS:
             self._flush_text()
-            self._run(f"input keyevent {ANDROID_ACTIONS[name]}")
+            if self.control:
+                self._press(ANDROID_ACTIONS[name])
+            else:
+                self._run(f"input keyevent {ANDROID_ACTIONS[name]}")
 
     def list_apps(self):
         out = adb("shell", "cmd", "package", "query-activities", "--brief", "-a", "android.intent.action.MAIN",
@@ -396,6 +608,36 @@ class DeviceManager:
     def connect_android_wifi(self, address):
         """`adb connect host:port` for a phone with wireless debugging on."""
         return adb("connect", address, timeout=15).strip()
+
+    def pair_android_wifi(self, pair_address, code, connect_address):
+        """Android 11+ Wireless debugging: pair once with the 6-digit code, then connect."""
+        out = adb("pair", pair_address, code, timeout=30).strip()
+        if "Successfully paired" not in out:
+            raise RuntimeError(out or "pairing failed")
+        return self.connect_android_wifi(connect_address)
+
+    def android_to_wifi(self, name, port=5555):
+        """Switch a USB-connected phone to ADB over Wi-Fi so it can be unplugged.
+
+        Lasts until the phone reboots. The phone still only accepts computers
+        it has already authorized.
+        """
+        serial = self.devices[name].serial
+        out = adb("shell", "ip", "-f", "inet", "addr", "show", "wlan0", serial=serial)
+        ip = next((w.split("/")[0] for line in out.splitlines() for i, w in enumerate(line.split())
+                   if line.split()[0:1] == ["inet"] and i == 1), None)
+        if not ip:
+            raise RuntimeError("The phone isn't on Wi-Fi.")
+        adb("tcpip", str(port), serial=serial)
+        time.sleep(3)
+        address = f"{ip}:{port}"
+        for _ in range(3):  # the first attempt can race adbd restarting
+            out = self.connect_android_wifi(address)
+            if "connected" in out and "fail" not in out:
+                break
+            time.sleep(2)
+        self.refresh_android()
+        return address
 
     def add_computer(self, name, host, port=protocol.DEFAULT_PORT):
         self.devices[name] = ComputerDevice(name, host, port)

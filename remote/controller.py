@@ -66,8 +66,9 @@ class ControllerApp:
         self.listbox.pack(fill="y", expand=True, pady=4)
         self.listbox.bind("<Double-Button-1>", lambda _e: self.select_highlighted())
         for text, cmd in (("Connect", self.select_highlighted), ("Disconnect", self.disconnect),
-                          ("Refresh phones", self.refresh_phones), ("Phone over Wi-Fi...", self.add_wifi_phone),
-                          ("Add computer...", self.add_computer), ("Remove", self.remove)):
+                          ("Refresh phones", self.refresh_phones), ("USB phone → Wi-Fi", self.usb_to_wifi),
+                          ("Pair phone (Wi-Fi)...", self.add_wifi_phone), ("Add computer...", self.add_computer),
+                          ("Remove", self.remove)):
             ttk.Button(side, text=text, command=cmd).pack(fill="x", pady=1)
 
         main = ttk.Frame(root)
@@ -125,13 +126,48 @@ class ControllerApp:
             messagebox.showinfo("Phones", "No phones found. Plug one in with USB debugging on and accept "
                                           "the 'Allow USB debugging' prompt on the phone.")
 
+    def usb_to_wifi(self):
+        name = self.highlighted()
+        device = self.manager.devices.get(name)
+        if not isinstance(device, AndroidDevice) or ":" in device.serial:
+            messagebox.showinfo("USB phone → Wi-Fi", "Select a phone that's connected by USB first.")
+            return
+        self.status.config(text=f"Switching {name} to Wi-Fi...")
+
+        def work():
+            try:
+                address = self.manager.android_to_wifi(name)
+                msg = f"{name} is available over Wi-Fi at {address}. You can unplug it."
+            except Exception as e:  # noqa: BLE001
+                msg = f"Couldn't switch to Wi-Fi: {e}"
+            self.root.after(0, lambda: (self.status.config(text=msg), self.refresh_list()))
+        threading.Thread(target=work, daemon=True).start()
+
     def add_wifi_phone(self):
-        addr = simpledialog.askstring("Phone over Wi-Fi",
-                                      "Phone address (ip:port) from Wireless debugging.\n"
-                                      "Pair it first once with:  adb pair ip:pairing_port", parent=self.root)
-        if addr:
-            self.status.config(text=self.manager.connect_android_wifi(addr.strip()))
-            self.refresh_phones(quiet=True)
+        info = ("On the phone: Developer options → Wireless debugging → on.\n"
+                "Tap 'Pair device with pairing code'.")
+        pair = simpledialog.askstring("Pair phone (Wi-Fi)", info + "\n\nIP address & port shown under the code:",
+                                      parent=self.root)
+        if not pair:
+            return
+        code = simpledialog.askstring("Pair phone (Wi-Fi)", "6-digit pairing code:", parent=self.root)
+        if not code:
+            return
+        connect = simpledialog.askstring("Pair phone (Wi-Fi)",
+                                         "Now the IP address & port on the main Wireless debugging screen\n"
+                                         "(it's a different port from the pairing one):", parent=self.root)
+        if not connect:
+            return
+        self.status.config(text="Pairing...")
+
+        def work():
+            try:
+                msg = self.manager.pair_android_wifi(pair.strip(), code.strip(), connect.strip())
+                self.manager.refresh_android()
+            except Exception as e:  # noqa: BLE001
+                msg = f"Pairing failed: {e}"
+            self.root.after(0, lambda: (self.status.config(text=msg), self.refresh_list()))
+        threading.Thread(target=work, daemon=True).start()
 
     def add_computer(self):
         host = simpledialog.askstring("Add computer", "IP address or hostname of the computer running agent.py:",
