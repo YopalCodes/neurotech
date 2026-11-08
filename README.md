@@ -30,6 +30,8 @@ two apps connected at once would keep taking control from each other.
 | `laptop/train.py` | Trains the model of your taught objects | No |
 | `laptop/library.py` | Stores taught objects in `library/` | No |
 | `library/` | **Your taught objects: photos and trained model** | Through the app |
+| `laptop/devices_panel.py`, `laptop/device_window.py` | Devices tab: connect to and control other computers and phones | No |
+| `remote/` | Device control: phones over ADB, computers running `agent.py` (see `remote/README.md`) | No |
 | `eeg/app.py` | EEG app window | No |
 | `eeg/signals.py` | Filters, features, classifier | Only to tune detection |
 | `eeg/sources.py` | NeuroPawn board (BrainFlow) and a simulated headset | No |
@@ -155,6 +157,44 @@ They are ordinary files, so copy the folder to back it up or share it. Git ignor
 the photos show your surroundings. Training scratch files go in `~/.neurotech/training`, outside
 OneDrive. You can also train from a terminal: `python laptop/train.py` (add `--epochs 100` to
 train longer).
+
+### Devices tab: control other computers and phones
+
+The **Devices** tab lets the desktop app take over another computer or an Android phone. It
+uses `remote/`, from Aram's device-control branch. When you connect, a window opens with the
+device's live screen, and your mouse and keyboard drive it.
+
+**Computers** (Windows, macOS, Linux), on the same network:
+1. On the computer, run `pip install -r remote/requirements.txt`.
+2. Then run `python remote/agent.py --password <at least 8 characters>`. It prints its IP address.
+   On Windows, allow it through the firewall.
+3. In the app, click **Add PC...** and enter that address.
+4. Double-click the PC, or select it and click **Connect & open screen**, and enter the password.
+
+The link is encrypted, and the agent refuses connections without the password. Its console shows
+when someone is controlling it. Ctrl+C there stops sharing.
+
+**Android phones:** no app is installed on the phone.
+1. Install Android platform-tools on the laptop: `winget install Google.PlatformTools`.
+2. On the phone, turn on USB debugging, then plug it in and allow this computer.
+3. Click **Find phones**.
+
+To control a phone over Wi-Fi, select it while it's plugged in, click **Phone → Wi-Fi**, then
+unplug it. Alternatively, use **Pair phone...** with Android's Wireless debugging. In the phone
+window:
+
+| Mouse | Phone |
+|---|---|
+| click | tap |
+| drag | swipe |
+| right-click | Back |
+| wheel | scroll |
+
+Typing works too, and the toolbar has Home, Recents and Open app.
+
+One device is controlled at a time. Closing its window disconnects it. `remote/README.md` has
+more detail, and `python remote/controller.py` runs the same control on its own, without the
+vision app.
 
 ## EEG app
 

@@ -1,6 +1,7 @@
 """Desktop app: live video from the Pi with AI detections, status, and controls, plus a
-Teach tab for training the camera to recognise your own objects, and an Eyes tab for steering
-the motor with the NeuroPawn EOG headset.
+Teach tab for training the camera to recognise your own objects, an Eyes tab for steering
+the motor with the NeuroPawn EOG headset, and a Devices tab for controlling other computers
+and phones (remote/).
 
     python laptop/app.py --pi 192.168.1.50
     python laptop/app.py --source 0        # use this laptop's webcam instead of the Pi
@@ -26,6 +27,7 @@ from PySide6.QtWidgets import (
 
 from engine import Engine, describe
 from eye_control import EyeControl, EyePanel
+from devices_panel import DevicesPanel
 from dog_panel import DogController, DogPanel
 from library import DEFAULT_ROOT, Library
 from teach import TeachPanel
@@ -242,6 +244,8 @@ class MainWindow(QMainWindow):
         self.dog_panel.toggle.toggled.connect(self.set_dog)
         self.dog_panel.stop_button.clicked.connect(self.stop_dog)
         self.tabs.addTab(self.dog_panel, "Dog")
+        self.devices_panel = DevicesPanel()
+        self.tabs.addTab(self.devices_panel, "Devices")
         self.tabs.currentChanged.connect(lambda _: self.teach.cancel_photo())
 
         side = QWidget()
@@ -492,6 +496,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self.timer.stop()
+        self.devices_panel.shutdown()   # closes device windows and disconnects
         self.teach.shutdown()
         self.engine.stop()
         if self.dog is not None:
