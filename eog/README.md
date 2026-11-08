@@ -11,6 +11,7 @@ python record.py --port COM5     # cued recording session (~6 min)
 python train.py --plot           # train + cross-validate, saves models/
 python live.py --port COM5       # real-time eye events + head tilt in the terminal
 python head_tilt.py --port COM5  # head tilt only, with live angles
+python dog_control.py --port COM5  # drive a MechDog with head tilt (see ../mechdog)
 ```
 
 Every script accepts `--synthetic` to run on BrainFlow's fake board without hardware.

@@ -28,6 +28,13 @@ CAL_TILT_DEG = 15       # minimum tilt accepted during the calibration tilts
 IMU_ALPHA = 0.02        # complementary filter: weight of the accelerometer per sample
 HEAD_MOTION_GATE = 60   # deg/s; ignore eye events while the head turns faster than this
 
+# MechDog head control (see dog_control.py and ../mechdog/main.py)
+DOG_NAME = "MechDog_Head"  # BLE name advertised by mechdog/main.py
+DOG_STRIDE = 80            # mm per step while walking (MechDog range -100..100)
+DOG_MAX_TURN = 25          # deg, MechDog turn angle at full head roll (range -30..30)
+STEER_DEADZONE = 8         # deg of head roll ignored so small wobbles don't steer
+STEER_FULL = 25            # deg of head roll that gives the full turn
+
 # Event labels. Marker values are written into BrainFlow's marker channel.
 LABELS = {1: "rest", 2: "left", 3: "right", 4: "blink"}
 MARKERS = {name: value for value, name in LABELS.items()}
