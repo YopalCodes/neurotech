@@ -1,0 +1,5 @@
+mss
+pynput
+Pillow
+av            # decodes the Android H.264 screen stream
+cryptography  # AES-GCM for the controller <-> agent link

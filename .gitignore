@@ -4,3 +4,6 @@ __pycache__/
 
 # Recordings made on the wrong channels (noise only)
 eog/data/old_wrong_channels/
+
+# Saved device list (local network addresses)
+remote/devices.json
